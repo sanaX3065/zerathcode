@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ─────────────────────────────────────────────
-#  ZerathCode v1 — Termux Install Script
-#  Multi-Agent AI Dev System
+#  ZerathCode v4 — Termux Install Script
+#  Best of HexOverlord + ZerathCode
 #  Run: bash install.sh
 # ─────────────────────────────────────────────
 
@@ -22,8 +22,8 @@ fail()  { echo -e "${C_RED}✖  $1${C_RESET}"; }
 
 echo ""
 echo -e "${C_MAGENTA}${C_BOLD}  ╔══════════════════════════════════════════════╗${C_RESET}"
-echo -e "${C_MAGENTA}${C_BOLD}  ║   ZerathCode v1 — Termux Installer           ║${C_RESET}"
-echo -e "${C_MAGENTA}${C_BOLD}  ║   Multi-Agent AI Dev System                   ║${C_RESET}"
+echo -e "${C_MAGENTA}${C_BOLD}  ║   ZerathCode v4 — Termux Installer           ║${C_RESET}"
+echo -e "${C_MAGENTA}${C_BOLD}  ║   Best of HexOverlord + ZerathCode            ║${C_RESET}"
 echo -e "${C_MAGENTA}${C_BOLD}  ╚══════════════════════════════════════════════╝${C_RESET}"
 echo ""
 
@@ -82,7 +82,7 @@ ok "'zerath' command linked"
 
 # ── Step 7: Create workspace ──────────────────────────────────────────────────
 mkdir -p "$HOME/hex-workspace"
-mkdir -p "$HOME/.zerathcode"
+mkdir -p "$HOME/.hexoverlord"
 ok "Workspace ready: ~/hex-workspace"
 
 # ── Step 8: Android SDK hint ──────────────────────────────────────────────────
@@ -100,7 +100,7 @@ echo -e "  ${C_CYAN}echo 'export ANDROID_SDK_ROOT=\$HOME/android-sdk' >> ~/.bash
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${C_GREEN}${C_BOLD}╔══════════════════════════════════════════════╗${C_RESET}"
-echo -e "${C_GREEN}${C_BOLD}║   ZerathCode v1 installed! 🚀                 ║${C_RESET}"
+echo -e "${C_GREEN}${C_BOLD}║   ZerathCode v4 installed! 🚀                 ║${C_RESET}"
 echo -e "${C_GREEN}${C_BOLD}╚══════════════════════════════════════════════╝${C_RESET}"
 echo ""
 echo "  Reload shell and run:"

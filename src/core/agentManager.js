@@ -13,7 +13,7 @@ const ApiKeyManager     = require("./apiKeyManager");
 
 // ── Agent Registry ─────────────────────────────────────────────────────────────
 const AGENT_REGISTRY = {
-  // ── ZerathCode agents ──
+  // ── HexOverlord agents ──
   file:      "../agents/fileAgent",
   web:       "../agents/webAgent",
   git:       "../agents/gitAgent",

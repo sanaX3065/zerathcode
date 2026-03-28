@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * bin/zerathcode.js
- * ZerathCode v1 — Unified Entry Point
- * Multi-Agent AI Dev System
+ * ZerathCode v4 — Unified Entry Point
+ * ZerathCode v1.0
  *
  * Two modes:
- *   zerath run              → Full interactive REPL (interactive workflow)
- *   zerath <agent> <cmd>    → Direct agent commands (CLI style)
+ *   zerath run              → Full interactive REPL
+ *   zerath <agent> <cmd>    → Direct agent commands (ZerathCode style)
  */
 
 "use strict";
@@ -14,7 +14,7 @@
 const args    = process.argv.slice(2);
 const command = args[0];
 
-// ── Route: run → interactive REPL (interactive workflow) ────────────────────────
+// ── Route: run → interactive REPL (HexOverlord workflow) ─────────────────────
 if (!command || command === "run") {
   const Repl = require("../src/core/repl");
   const repl = new Repl();
@@ -36,7 +36,7 @@ if (command === "--version" || command === "-v" || command === "version") {
 // ── Route: help ───────────────────────────────────────────────────────────────
 if (command === "--help" || command === "-h" || command === "help") {
   console.log(`
-\x1b[35m  ZerathCode v1\x1b[0m — Multi-Agent AI Dev System for Termux
+\x1b[35m  ZerathCode v4\x1b[0m — Multi-Agent AI Dev System for Termux
 
 \x1b[36mPrimary (Interactive REPL):\x1b[0m
   \x1b[32mzerath run\x1b[0m                     Launch the full interactive agent

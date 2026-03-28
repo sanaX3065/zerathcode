@@ -62,12 +62,12 @@ class Renderer {
     const w    = Math.min(termWidth(), 72);
     const line = "═".repeat(w);
     console.log(`\n${C.bmagenta}${line}${C.reset}`);
-    console.log(`${C.bmagenta}  ╔═════════════════════════════════════════╗${C.reset}`);
-    console.log(`${C.bmagenta}  ║${C.byellow}     ZERATHCODE v1                   ${C.bmagenta}║${C.reset}`);
-    console.log(`${C.bmagenta}  ║${C.byellow}  Multi-Agent AI Dev System         ${C.bmagenta}║${C.reset}`);
-    console.log(`${C.bmagenta}  ║${C.byellow}  Termux Edition                    ${C.bmagenta}║${C.reset}`);
-    console.log(`${C.bmagenta}  ╚═════════════════════════════════════════╝${C.reset}`);
-    console.log(`${C.grey}  ZerathCode v1  •  Multi-Agent AI Dev System  •  Termux${C.reset}`);
+    console.log(`${C.bmagenta}  ╔══╗  ╔═══╗╔══╗  ╔══╗╔════╗╔╗  ╔╗  ${C.byellow}╔════╗╔═══╗╔══╗  ╔══╗${C.reset}`);
+    console.log(`${C.bmagenta}  ╚══╗  ║╔══╝║╔╗╚╗╔╝╔╗║║╔╗╔╗║║╚╗╔╝║  ${C.byellow}║╔══╗║║╔══╝║╔╗╚╗╔╝╔╗║${C.reset}`);
+    console.log(`${C.bmagenta}  ╔══╝  ║╚══╗║║╚╗╚╝╔╝║║╚╝║║╚╝║ ╚╝ ║  ${C.byellow}║║  ╚╝║╚══╗║║╚╗╚╝╔╝║║${C.reset}`);
+    console.log(`${C.bmagenta}  ║╔═╗  ║╔══╝║║ ╚╗╔╝ ║║  ║║  ║     ║  ${C.byellow}║║  ╔╗║╔══╝║║ ╚╗╔╝ ║║${C.reset}`);
+    console.log(`${C.bmagenta}  ╚╩══╝ ╚╩══╝╚╝  ╚╝  ╚╝  ╚╝  ╚╝     ╚╝ ${C.byellow}╚╩══╝╚╩══╝╚╝  ╚╝  ╚╝${C.reset}`);
+    console.log(`${C.grey}  ZerathCode v1.0  •  Multi-Agent AI Dev System  •  Termux${C.reset}`);
     console.log(`${C.bmagenta}${line}${C.reset}\n`);
   }
 

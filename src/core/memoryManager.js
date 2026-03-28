@@ -424,7 +424,7 @@ Continue development. The project uses ${p.stack || "the stack described above"}
       this._data.project.updated = new Date().toISOString();
       fs.writeFileSync(this.memFile, JSON.stringify(this._data, null, 2), "utf8");
     } catch (err) {
-      if (process.env.HEX_DEBUG) console.error("[memory] save failed:", err.message);
+      if (process.env.ZERATH_DEBUG) console.error("[memory] save failed:", err.message);
     }
   }
 

@@ -23,7 +23,7 @@ const COLOURS = {
 class Logger {
   constructor(context = "ZerathCode") {
     this.context  = context;
-    this.minLevel = process.env.HEX_DEBUG ? LEVELS.DEBUG : LEVELS.INFO;
+    this.minLevel = process.env.ZERATH_DEBUG ? LEVELS.DEBUG : LEVELS.INFO;
   }
 
   debug(msg)   { this._log("DEBUG", msg); }

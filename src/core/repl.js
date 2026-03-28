@@ -294,8 +294,8 @@ class Repl {
       if (this._processing) return;
       if (!line) { showPrompt(); return; }
 
-      // Erase the echoed input line so logs start cleanly
-      process.stdout.write("\x1b[1A\x1b[2K");
+      // Erase the echoed prompt so logs print cleanly below
+      process.stdout.write("\r\x1b[K");
 
       // Meta / slash commands
       if (line.startsWith("/") || line.toLowerCase() === "exit") {
@@ -563,6 +563,7 @@ class Repl {
     } else {
       console.log(`${C.grey}  Session ended — ephemeral memory cleared.${C.reset}`);
     }
+    if (this.orchestrator) this.orchestrator.shutdown();
     this.monitor.stop();
     console.log(`\n${C.bmagenta}  Goodbye from ZerathCode.${C.reset}\n`);
     if (this.rl) this.rl.close();
