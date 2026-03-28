@@ -21,6 +21,10 @@ const renderer       = require("../ui/renderer");
 
 const MAX_ATTEMPTS = 3;
 
+// Known Termux / Node 22+ incompatible native packages
+const TERMUX_NATIVE_FAIL = /sqlite3.*prebuild-install|prebuild-install.*sqlite3|Cannot find module 'ini'|Cannot find module 'simple-concat'|Cannot find module 'readable-stream'/;
+const TERMUX_ESBUILD_FAIL = /Cannot find package.*esbuild|ERR_MODULE_NOT_FOUND.*esbuild/;
+
 // Error patterns that indicate something fixable
 const FIXABLE_PATTERNS = [
   /SyntaxError/i,
@@ -62,8 +66,10 @@ class SelfHealingAgent {
    * @param {number}   timeoutMs
    */
   async run(cmd, args = [], cwd = null, timeoutMs = 60000) {
-    const workDir = cwd || this.workDir;
-    let attempt   = 0;
+    const workDir   = cwd || this.workDir;
+    let attempt     = 0;
+    let lastError   = "";        // track to avoid identical AI calls
+    let knownFixed  = false;     // track if Termux pre-fix was already applied
 
     while (attempt < MAX_ATTEMPTS) {
       attempt++;
@@ -94,7 +100,26 @@ class SelfHealingAgent {
         return { success: false, output: combined, attempts: attempt };
       }
 
-      // Ask AI to fix
+      // ── Step 1: Check for known Termux/platform issues BEFORE calling AI ──
+      if (!knownFixed) {
+        const termuxResult = await this._applyTermuxKnownFix(combined, workDir);
+        if (termuxResult) {
+          knownFixed = true;
+          renderer.agentLog("system", "info", "Platform-specific fix applied — retrying…");
+          attempt--; // don't count this as a healing attempt
+          continue;
+        }
+      }
+
+      // ── Step 2: Skip AI call if same error repeats (AI fix didn't work) ──
+      if (combined === lastError) {
+        renderer.agentLog("system", "warn",
+          "Same error after fix — AI patch had no effect. Stopping.");
+        return { success: false, output: combined, attempts: attempt };
+      }
+      lastError = combined;
+
+      // ── Step 3: Ask AI to fix ─────────────────────────────────────────────
       const fixed = await this._requestFix(cmd, args, combined, workDir);
       if (!fixed) {
         renderer.agentLog("system", "warn", "AI could not generate a fix.");
@@ -107,6 +132,119 @@ class SelfHealingAgent {
     return { success: false, output: "", attempts: attempt };
   }
 
+  // ── Termux / platform-specific known fixes (called before AI) ────────────
+  async _applyTermuxKnownFix(errorOutput, workDir) {
+    // ── sqlite3 native compilation fails on Termux ARM ─────────────────────
+    if (TERMUX_NATIVE_FAIL.test(errorOutput)) {
+      const pkgPath = path.join(workDir, "package.json");
+      if (!fs.existsSync(pkgPath)) return false;
+
+      let pkg;
+      try { pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")); } catch { return false; }
+
+      const hasSqlite3 = pkg.dependencies?.sqlite3 || pkg.devDependencies?.sqlite3;
+      if (!hasSqlite3) {
+        // sqlite3 not in package.json but still failing — wipe node_modules/sqlite3
+        renderer.agentLog("system", "warn",
+          "sqlite3 native build broken — removing bad node_modules entry");
+        try {
+          const badDir = path.join(workDir, "node_modules", "sqlite3");
+          if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true });
+        } catch {}
+        return false; // let npm install retry without it
+      }
+
+      renderer.agentLog("system", "warn",
+        "sqlite3 cannot compile on Termux ARM — switching to better-sqlite3");
+
+      // Patch package.json
+      if (pkg.dependencies?.sqlite3)    delete pkg.dependencies.sqlite3;
+      if (pkg.devDependencies?.sqlite3) delete pkg.devDependencies.sqlite3;
+      if (!pkg.dependencies) pkg.dependencies = {};
+      pkg.dependencies["better-sqlite3"] = "^9.4.3";
+      fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2), "utf8");
+      renderer.agentLog("file", "edit", "package.json — sqlite3 → better-sqlite3");
+
+      // Patch server files: convert sqlite3 API to better-sqlite3 sync API
+      const candidates = ["server.js", "index.js", "app.js", "db.js", "src/db.js"];
+      for (const c of candidates) {
+        const fp = path.join(workDir, c);
+        if (!fs.existsSync(fp)) continue;
+        let content = fs.readFileSync(fp, "utf8");
+        if (!content.includes("sqlite3")) continue;
+        content = this._convertSqlite3ToBetter(content);
+        fs.writeFileSync(fp, content, "utf8");
+        renderer.agentLog("file", "edit", `${c} — updated to better-sqlite3 sync API`);
+      }
+
+      // Remove broken node_modules/sqlite3
+      try {
+        const badDir = path.join(workDir, "node_modules", "sqlite3");
+        if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true });
+      } catch {}
+
+      return true;
+    }
+
+    // ── esbuild ARM binary missing (Vite on Termux Node 22+) ───────────────
+    if (TERMUX_ESBUILD_FAIL.test(errorOutput)) {
+      renderer.agentLog("system", "warn",
+        "esbuild ARM binary missing — attempting force reinstall");
+      try {
+        const ebuildDir = path.join(workDir, "node_modules", "esbuild");
+        if (fs.existsSync(ebuildDir)) fs.rmSync(ebuildDir, { recursive: true, force: true });
+        await this._exec("npm", ["install", "--ignore-scripts", "esbuild"], workDir, 60000);
+        return true;
+      } catch {
+        renderer.agentLog("system", "warn",
+          "esbuild reinstall failed — Vite may not work on this Termux/Node version");
+        return false;
+      }
+    }
+
+    return false;
+  }
+
+  // ── Convert sqlite3 callback-style to better-sqlite3 sync style ───────────
+  _convertSqlite3ToBetter(content) {
+    let c = content;
+
+    // Replace require statements
+    c = c.replace(
+      /const\s+(\w+)\s*=\s*require\(['"]sqlite3['"]\)(?:\.verbose\(\))?/g,
+      "const Database = require('better-sqlite3')"
+    );
+
+    // Replace new Database constructor  (new sqlite3.Database / new db.Database)
+    c = c.replace(/new\s+\w+\.Database\(([^)]+)\)/g, "new Database($1)");
+
+    // Convert db.serialize() wrapper — just remove it, better-sqlite3 is sync
+    c = c.replace(/\w+\.serialize\s*\(\s*(?:function\s*)?\(\s*\)\s*\{/g, "{");
+
+    // Convert db.run(sql, params, callback) → db.prepare(sql).run(params)
+    c = c.replace(
+      /(\w+)\.run\((`[^`]+`|'[^']+'|"[^"]+"|\[[^\]]+\]|[^,]+),\s*(\[[^\]]*\]|\[[^\]]*\]),\s*(?:function\s*\([^)]*\)|[^{]*)\{([^}]*)\}\s*\)/g,
+      (m, db, sql, params) =>
+        `try { ${db}.prepare(${sql}).run(${params}); } catch(_e) { console.error(_e); }`
+    );
+
+    // Convert db.get(sql, params, callback) → const row = db.prepare(sql).get(params)
+    c = c.replace(
+      /(\w+)\.get\((`[^`]+`|'[^']+'|"[^"]+"|\[[^\]]+\]|[^,]+),\s*(\[[^\]]*\]|\[[^\]]*\]),\s*function\s*\(err,\s*(\w+)\)\s*\{/g,
+      (m, db, sql, params, rowVar) =>
+        `{ const ${rowVar} = ${db}.prepare(${sql}).get(${params}); if (true) {`
+    );
+
+    // Convert db.all(sql, params, callback) → const rows = db.prepare(sql).all(params)
+    c = c.replace(
+      /(\w+)\.all\((`[^`]+`|'[^']+'|"[^"]+"|\[[^\]]+\]|[^,]+),\s*(\[[^\]]*\]|\[[^\]]*\]),\s*function\s*\(err,\s*(\w+)\)\s*\{/g,
+      (m, db, sql, params, rowsVar) =>
+        `{ const ${rowsVar} = ${db}.prepare(${sql}).all(${params}); if (true) {`
+    );
+
+    return c;
+  }
+
   // ── Ask AI for a fix ───────────────────────────────────────────────────────
   async _requestFix(cmd, args, errorOutput, workDir) {
     renderer.agentLog("ai", "plan", "Analysing error and generating fix…");
@@ -115,9 +253,7 @@ class SelfHealingAgent {
     const filesContext = this._gatherRelevantFiles(workDir, errorOutput);
     const ctx          = this.memory.buildContextBlock();
 
-    const prompt = `You are an autonomous self-healing coding agent.
-
-A command failed. Your job is to analyse the error and return ONLY a JSON array of file patches to fix it.
+    const prompt = `You are an autonomous self-healing coding agent running inside Termux on Android (ARM64, Node.js v22+).
 
 FAILED COMMAND: ${cmd} ${args.join(" ")}
 WORKING DIR: ${workDir}
@@ -132,6 +268,14 @@ ${filesContext}
 
 ${ctx}
 
+TERMUX RULES (critical — these apply to ALL fixes):
+- NEVER suggest sqlite3 as a dependency — it cannot compile on Termux ARM. Use better-sqlite3 instead.
+- NEVER suggest vite or esbuild native rebuilds — they don't work on Termux Node 22+.
+- If the error is a missing module inside node_modules (ini, simple-concat, readable-stream), it means a native addon (like sqlite3) is broken. Fix by replacing that addon.
+- For database: always use better-sqlite3 (synchronous API, no callbacks).
+- For frontend bundling: never use vite/parcel/webpack. Use plain HTML+CSS+JS in a public/ folder served by Express.
+- npm install --ignore-scripts can bypass failed postinstall scripts.
+
 RULES:
 - Output ONLY a valid JSON array of patch objects — no prose, no markdown outside the array.
 - Each patch must fix the EXACT error shown above.
@@ -140,7 +284,6 @@ RULES:
   { "action": "edit_file",   "params": { "path": "relative/path", "find": "exact text", "replace": "fixed text" } }
   { "action": "run_command", "params": { "cmd": "npm", "args": ["install", "missing-package"], "cwd": "." } }
   { "action": "message",     "params": { "text": "explanation of what was wrong and what was fixed" } }
-- If the error is "module not found X", add a run_command to install it first.
 - Always include a message step explaining the fix.
 - Do NOT include plan or memory_note steps.`;
 

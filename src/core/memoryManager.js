@@ -128,6 +128,38 @@ class MemoryManager {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // File completion status — locks file against full rewrites
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Mark a file as completed (stable). Only targeted edits should happen after this. */
+  markFileComplete(absPath) {
+    if (!this.projectDir) return;
+    const rel = path.relative(this.projectDir, absPath);
+    if (!this._data.completedFiles) this._data.completedFiles = [];
+    if (!this._data.completedFiles.includes(rel)) {
+      this._data.completedFiles.push(rel);
+      this._save();
+    }
+  }
+
+  /** Check if a file is marked as completed. */
+  isFileComplete(absPath) {
+    if (!this.projectDir) return false;
+    const rel = path.relative(this.projectDir, absPath);
+    return (this._data.completedFiles || []).includes(rel);
+  }
+
+  /** Un-mark a file (allow full rewrites again). */
+  unmarkFileComplete(absPath) {
+    if (!this.projectDir) return;
+    const rel = path.relative(this.projectDir, absPath);
+    this._data.completedFiles = (this._data.completedFiles || []).filter(f => f !== rel);
+    this._save();
+  }
+
+  getCompletedFiles() { return this._data.completedFiles || []; }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Agent action log
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -352,6 +384,9 @@ Continue development. The project uses ${p.stack || "the stack described above"}
       files || "  (none yet)",
       `║ Dependencies: ${(this._data.deps || []).join(", ") || "none"}`,
       `║ Run:          ${(this._data.runCommands || []).join(" | ") || "not set"}`,
+      (this._data.completedFiles || []).length
+        ? `╠══ COMPLETED FILES (DO NOT FULLY REWRITE) ══════════════════\n${(this._data.completedFiles || []).map(f => `  ✓ ${f}`).join("\n")}`
+        : "",
       recentErrors ? "╠══ OPEN ERRORS ═════════════════════════════════════════════\n" + recentErrors : "",
       notes        ? "╠══ NOTES ═══════════════════════════════════════════════════\n" + notes         : "",
       recentActions ? "╠══ RECENT ACTIONS ══════════════════════════════════════════\n" + recentActions  : "",
@@ -391,6 +426,7 @@ Continue development. The project uses ${p.stack || "the stack described above"}
       actionLog:   [],
       errors:      [],
       notes:       [],
+      completedFiles: [],   // files whose structure is locked — only targeted edits allowed
     };
   }
 
@@ -409,7 +445,7 @@ Continue development. The project uses ${p.stack || "the stack described above"}
         const raw = JSON.parse(fs.readFileSync(this.memFile, "utf8"));
         // Merge with blank to ensure all keys exist (forward compat)
         const blank = this._blankData("", "");
-        return { ...blank, ...raw, project: { ...blank.project, ...(raw.project || {}) } };
+        return { ...blank, ...raw, project: { ...blank.project, ...(raw.project || {}) }, completedFiles: raw.completedFiles || [] };
       }
     } catch {}
     return this._blankData("", "");

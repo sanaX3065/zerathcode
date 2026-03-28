@@ -416,6 +416,15 @@ class Orchestrator {
         const fp = this._resolvePath(params.path);
         if (!fp) return null;
 
+        const rel = path.relative(this.workDir, fp);
+
+        // ── Completed file guard: block full rewrites of stable files ────────
+        if (fs.existsSync(fp) && this.memory.isFileComplete(fp)) {
+          renderer.agentLog("file", "warn",
+            `${rel}  ${C.grey}SKIPPED — file is completed. Use edit_file for targeted changes.${C.reset}`);
+          return null;
+        }
+
         const dir = path.dirname(fp);
         if (!fs.existsSync(dir)) {
           fs.mkdirSync(dir, { recursive: true });
@@ -426,7 +435,6 @@ class Orchestrator {
         const content = params.content || "";
         fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
 
-        const rel  = path.relative(this.workDir, fp);
         const ext  = path.extname(fp).slice(1).toLowerCase();
         const lang = {
           js: "JavaScript", ts: "TypeScript", kt: "Kotlin", java: "Java",
@@ -438,6 +446,8 @@ class Orchestrator {
         renderer.agentLog("file", "create", `${rel}  ${C.grey}(${lang}, ${content.split("\n").length} lines)${C.reset}`);
         this.memory.logAction("file", "create", rel);
         this.memory.registerFile(fp, `${lang} — ${path.basename(fp)}`, lang);
+        // Auto-mark as completed so future AI turns can't blindly rewrite it
+        this.memory.markFileComplete(fp);
         this._filesCreated++;
 
         // Extract port from server files for auto-run
@@ -767,8 +777,12 @@ class Orchestrator {
   _buildSystemPrompt() {
     const base    = SYSTEM_PROMPTS[this.mode] || SYSTEM_PROMPTS.chat;
     const context = this.memory.buildContextBlock();
+    const completed = this.memory.getCompletedFiles();
+    const completedRule = completed.length
+      ? `\n\nCOMPLETED FILES — CRITICAL RULE:\nThese files are stable. You MUST NOT use create_file on them.\nUse ONLY edit_file with find/replace for targeted changes:\n${completed.map(f => `  ✓ ${f}`).join("\n")}`
+      : "";
     return (
-      base + "\n\n" + context +
+      base + "\n\n" + context + completedRule +
       "\n\nFINAL REMINDER: Your ENTIRE response must be a valid JSON array." +
       " Start with [ and end with ]. No text outside the array."
     );

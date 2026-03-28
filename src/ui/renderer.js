@@ -58,18 +58,24 @@ function stripAnsi(str) {
 class Renderer {
 
   // ── Banner ─────────────────────────────────────────────────────────────────
-  banner() {
-    const w    = Math.min(termWidth(), 72);
-    const line = "═".repeat(w);
-    console.log(`\n${C.bmagenta}${line}${C.reset}`);
-    console.log(`${C.bmagenta}  ╔══╗  ╔═══╗╔══╗  ╔══╗╔════╗╔╗  ╔╗  ${C.byellow}╔════╗╔═══╗╔══╗  ╔══╗${C.reset}`);
-    console.log(`${C.bmagenta}  ╚══╗  ║╔══╝║╔╗╚╗╔╝╔╗║║╔╗╔╗║║╚╗╔╝║  ${C.byellow}║╔══╗║║╔══╝║╔╗╚╗╔╝╔╗║${C.reset}`);
-    console.log(`${C.bmagenta}  ╔══╝  ║╚══╗║║╚╗╚╝╔╝║║╚╝║║╚╝║ ╚╝ ║  ${C.byellow}║║  ╚╝║╚══╗║║╚╗╚╝╔╝║║${C.reset}`);
-    console.log(`${C.bmagenta}  ║╔═╗  ║╔══╝║║ ╚╗╔╝ ║║  ║║  ║     ║  ${C.byellow}║║  ╔╗║╔══╝║║ ╚╗╔╝ ║║${C.reset}`);
-    console.log(`${C.bmagenta}  ╚╩══╝ ╚╩══╝╚╝  ╚╝  ╚╝  ╚╝  ╚╝     ╚╝ ${C.byellow}╚╩══╝╚╩══╝╚╝  ╚╝  ╚╝${C.reset}`);
-    console.log(`${C.grey}  ZerathCode v1.0  •  Multi-Agent AI Dev System  •  Termux${C.reset}`);
-    console.log(`${C.bmagenta}${line}${C.reset}\n`);
-  }
+banner() {
+  const w    = Math.min(termWidth(), 72);
+  const line = "═".repeat(w);
+
+  console.log(`\n${C.bmagenta}${line}${C.reset}`);
+
+  // Clean ZERATHCODE Banner
+  console.log(`${C.bmagenta}${C.bold}███████╗███████╗██████╗  █████╗ ████████╗██╗  ██╗ ██████╗ ██████╗ ███████╗${C.reset}`);
+  console.log(`${C.bmagenta}${C.bold}╚══███╔╝██╔════╝██╔══██╗██╔══██╗╚══██╔══╝██║  ██║██╔════╝██╔═══██╗██╔════╝${C.reset}`);
+  console.log(`${C.byellow}${C.bold}  ███╔╝ █████╗   ██████╔╝███████║   ██║   ███████║██║     ██║   ██║███████╗${C.reset}`);
+  console.log(`${C.byellow}${C.bold} ███╔╝  ██╔══╝   ██╔══██╗██╔══██║   ██║   ██╔══██║██║     ██║   ██║╚════██║${C.reset}`);
+  console.log(`${C.bmagenta}${C.bold}███████╗███████╗██║  ██║██║  ██║   ██║   ██║  ██║╚██████╗╚██████╔╝███████║${C.reset}`);
+  console.log(`${C.bmagenta}${C.bold}╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝${C.reset}`);
+
+  console.log(`${C.grey}  v1.0  •  Multi-Agent AI Dev System  •  Termux${C.reset}`);
+
+  console.log(`${C.bmagenta}${line}${C.reset}\n`);
+}
 
   // ── Section header ─────────────────────────────────────────────────────────
   section(title) {
