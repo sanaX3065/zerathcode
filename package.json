@@ -1,0 +1,21 @@
+{
+  "name": "zerathcode",
+  "version": "1.0.0",
+  "description": "ZerathCode — Multi-Agent AI Dev System for Termux",
+  "author": "sanaX3065",
+  "license": "MIT",
+  "main": "bin/zerathcode.js",
+  "bin": {
+    "zerath":     "./bin/zerathcode.js",
+    "zerathcode": "./bin/zerathcode.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["cli", "agent", "termux", "android", "ai", "repl", "coding-agent", "autonomous"],
+  "scripts": {
+    "start": "node bin/zerathcode.js run",
+    "link": "npm link"
+  },
+  "dependencies": {}
+}
