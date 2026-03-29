@@ -155,6 +155,56 @@ class WebAgent extends BaseAgent {
       return { ok: false, status: 400, statusText: "Bad Request", url: "", text: "(no query provided)", rawSize: 0, textSize: 0, sources: [] };
     }
 
+    // If the question has multiple distinct topics, run multiple searches.
+    // This prevents one topic (e.g., N+1) from dominating the retrieved chunks.
+    const subQueries = WebAgent._decomposeQuery(q);
+    const multi = opts.multi !== false && subQueries.length > 1;
+
+    if (!multi) {
+      return WebAgent._searchAndRagSingle(q, opts);
+    }
+
+    // Keep the number of sub-queries bounded to avoid huge fanout.
+    const limited = subQueries.slice(0, 3);
+    const parts = [];
+    const allSources = [];
+
+    // Allocate output budget across parts.
+    const perBudget = Math.max(900, Math.floor(maxOut / limited.length));
+
+    for (const sq of limited) {
+      const out = await WebAgent._searchAndRagSingle(sq, { ...opts, maxChars: perBudget });
+      if (out?.text) {
+        parts.push(out.text.trim());
+      }
+      if (Array.isArray(out?.sources)) allSources.push(...out.sources);
+    }
+
+    const combined = [
+      `RAG (multi-query) from: ${q}`,
+      "",
+      parts.join("\n\n===\n\n") || "(no excerpts found)",
+    ].join("\n").slice(0, maxOut);
+
+    const sources = Array.from(new Set(allSources)).slice(0, maxSites * limited.length);
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url: WebAgent.googleSearchUrl(q),
+      text: combined,
+      rawSize: combined.length,
+      textSize: combined.length,
+      sources,
+    };
+  }
+
+  static async _searchAndRagSingle(query, opts = {}) {
+    const q = String(query || "").trim();
+    const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
+    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 5;
+    const concurrency = Number.isFinite(opts.concurrency) ? Math.max(1, Math.floor(opts.concurrency)) : 3;
+
     let urls = [];
     try {
       urls = await WebAgent._duckDuckGoHtmlUrls(q, opts);
@@ -168,37 +218,34 @@ class WebAgent extends BaseAgent {
 
     urls = urls.slice(0, maxSites);
 
-    const pages = [];
-    const sources = [];
-
-    // Fetch sequentially to keep Termux/network usage predictable.
-    for (const u of urls) {
+    const fetched = await WebAgent._mapLimit(urls, concurrency, async (u) => {
       try {
         const page = await WebAgent.fetchText(u, {
           ...opts,
           // Give the chunker enough room; final output is trimmed later.
-          maxChars: 18000,
+          maxChars: 12000,
           minChars: 350,
         });
         if (page && page.text && page.text.length > 250) {
-          pages.push({ url: u, text: page.text });
-          sources.push(u);
+          return { url: u, text: page.text };
         }
-      } catch {
-        // ignore one bad page
-      }
-    }
+      } catch {}
+      return null;
+    });
+
+    const pages = fetched.filter(Boolean);
+    const sources = pages.map((p) => p.url);
 
     const selected = WebAgent._selectTopRagChunks(pages, q, {
-      maxChunks: 10,
-      maxPerSource: 3,
+      maxChunks: 8,
+      maxPerSource: 2,
       chunkSize: 900,
       overlap: 140,
       snippetChars: 520,
     });
 
     const header = [
-      `RAG query: ${q}`,
+      `RAG subquery: ${q}`,
       `Sources (${sources.length}/${maxSites}):`,
       ...sources.map((s) => `- ${s}`),
       "",
@@ -207,15 +254,58 @@ class WebAgent extends BaseAgent {
     ].join("\n");
 
     const body = selected.length
-      ? selected.map((c, i) => {
-        const src = c.source;
-        const score = c.score;
-        return `(${i + 1}) [${score}] ${src}\n${c.text}`;
-      }).join("\n\n")
+      ? selected.map((c, i) => `(${i + 1}) [${c.score}] ${c.source}\n${c.text}`).join("\n\n")
       : "(no relevant excerpts found)";
 
     const text = (header + body).slice(0, maxOut);
     return { ok: true, status: 200, statusText: "OK", url: WebAgent.googleSearchUrl(q), text, rawSize: text.length, textSize: text.length, sources };
+  }
+
+  static _decomposeQuery(query) {
+    const s = String(query || "").toLowerCase();
+    const out = [];
+
+    // Django hints
+    const hasDjango = s.includes("django");
+    const ver = (s.match(/\b(\d+\.\d+)\b/) || [])[1] || "5.0";
+
+    const hasN1 = /(n\+1|n\s*\+\s*1)/.test(s) || s.includes("select_related") || s.includes("prefetch_related");
+    const hasInj = /(sql\s*injection|injection|rawsql|raw\s+sql|extra\()/i.test(s);
+    const hasConnector = /\bconnector\b|_connector/.test(s);
+
+    if (hasN1) {
+      out.push(`${hasDjango ? `Django ${ver} ` : ""}ORM N+1 problem select_related prefetch_related query optimization`);
+    }
+    if (hasInj || hasConnector) {
+      out.push(`${hasDjango ? `Django ${ver} ` : ""}ORM SQL injection prevention RawSQL extra() raw() params parameterized queries ${hasConnector ? "connector" : ""}`.trim());
+    }
+
+    // If we didn't detect anything, do a best-effort split on "and" for multi-part questions.
+    if (out.length === 0) {
+      const parts = String(query).split(/\s+\band\b\s+/i).map((p) => p.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        for (const p of parts.slice(0, 3)) out.push(p);
+      }
+    }
+
+    return out.length ? out : [query];
+  }
+
+  static async _mapLimit(items, limit, fn) {
+    const arr = Array.isArray(items) ? items : [];
+    const out = new Array(arr.length);
+    let idx = 0;
+
+    const workers = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
+      while (true) {
+        const i = idx++;
+        if (i >= arr.length) break;
+        out[i] = await fn(arr[i], i);
+      }
+    });
+
+    await Promise.all(workers);
+    return out;
   }
 
   static _jinaUrl(url) {

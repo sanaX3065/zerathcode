@@ -61,6 +61,10 @@ HOW TO USE WEB_FETCH:
 - Prefer query-based fetch (recommended): the tool will search the web, scrape the first results, chunk them, and return only the most relevant excerpts.
 - Use url-based fetch only when you already know the exact page you want.
 
+MULTI-PART QUESTIONS:
+- If the question has multiple topics (e.g., "N+1" AND "SQL injection"), you can call web_fetch multiple times with different queries.
+- If you call web_fetch multiple times (even 5 times), each call will scrape up to 5 sites and return the top relevant chunks.
+
 RESPONSE FORMAT — ONLY valid JSON arrays, nothing else:
 
 To answer directly:
