@@ -22,20 +22,31 @@ const fs = require("fs");
 // ── Model cache directory ──────────────────────────────────────────────────
 const CACHE_DIR = path.join(process.env.HOME || "/tmp", ".zerathcode", "embeddings");
 
-let ModelClass = null;
 let pipelineFn = null;
+let semanticDisabled = process.env.ZERATHCODE_SEMANTIC_DISABLED === "1";
 
 // Lazy-load transformers library on first use
 async function loadTransformersModule() {
   if (pipelineFn) return pipelineFn;
+  if (semanticDisabled) return null;
 
   try {
-    // @xenova/transformers exports pipeline for creating embeddings
-    const { pipeline, env } = await import("@xenova/transformers");
+    // Try to require @xenova/transformers
+    let transformers;
+    try {
+      transformers = require("@xenova/transformers");
+    } catch {
+      // Fallback: try dynamic import
+      transformers = await import("@xenova/transformers");
+    }
+
+    const { pipeline, env } = transformers;
     
     // Configure cache to use Termux-friendly location
-    env.localModelPath = CACHE_DIR;
-    env.allowDownloads = true;
+    if (env) {
+      env.localModelPath = CACHE_DIR;
+      env.allowDownloads = true;
+    }
     
     // Initialize model (this will download ~30MB on first run)
     // Using a lightweight all-MiniLM-L6-v2 model (33M params)
@@ -43,8 +54,9 @@ async function loadTransformersModule() {
     
     return pipelineFn;
   } catch (err) {
-    console.warn("Warning: Failed to load embedding model:", err.message);
-    console.warn("Falling back to keyword-only retrieval");
+    console.warn("⚠ Embedding model unavailable:", err.message);
+    console.warn("⚠ Using keyword-only retrieval (less accurate)");
+    semanticDisabled = true;
     return null;
   }
 }
@@ -181,29 +193,53 @@ class EmbeddingManager {
     const keywordWeight = opts.keywordWeight ?? 0.3;
     const semanticWeight = opts.semanticWeight ?? 0.7;
 
-    if (!Array.isArray(chunks)) return [];
+    if (!Array.isArray(chunks) || chunks.length === 0) return [];
 
-    // Semantic scores (if model available)
-    const queryEmbedding = await this.embed(query);
-    const chunkEmbeddings = await this.embedBatch(chunks);
+    // Semantic scores (if model available and not disabled)
+    let semanticScores = [];
+    let hasValidSemanticScores = false;
 
-    const semanticScores = chunkEmbeddings.map((emb) => {
-      if (!emb || !queryEmbedding) return 0;
-      return EmbeddingManager.cosineSimilarity(queryEmbedding, emb);
-    });
+    if (!semanticDisabled) {
+      try {
+        const queryEmbedding = await this.embed(query);
+        const chunkEmbeddings = await this.embedBatch(chunks);
 
-    // Keyword scores (fallback + hybrid)
+        semanticScores = chunkEmbeddings.map((emb) => {
+          if (!emb || !queryEmbedding) return 0;
+          return EmbeddingManager.cosineSimilarity(queryEmbedding, emb);
+        });
+
+        hasValidSemanticScores = semanticScores.some(s => s > 0);
+      } catch (err) {
+        // If semantic scoring fails, use keyword-only
+        semanticScores = chunks.map(() => 0);
+      }
+    } else {
+      semanticScores = chunks.map(() => 0);
+    }
+
+    // Keyword scores (ALWAYS run, not just fallback)
     const keywordScores = chunks.map((chunk) =>
       this._scoreKeywords(query, chunk)
     );
+
+    // Adjust weights if semantic scores are missing
+    let finalKeywordWeight = keywordWeight;
+    let finalSemanticWeight = semanticWeight;
+
+    if (!hasValidSemanticScores) {
+      // Boost keyword weight if no semantic scores available
+      finalKeywordWeight = 0.95;
+      finalSemanticWeight = 0.05;
+    }
 
     // Combine scores
     const results = chunks.map((chunk, i) => {
       const semantic = semanticScores[i] || 0;
       const keyword = keywordScores[i] || 0;
 
-      // Weighted combination (normalize both to [0,1])
-      const score = keyword * keywordWeight + semantic * semanticWeight;
+      // Weighted combination
+      const score = keyword * finalKeywordWeight + semantic * finalSemanticWeight;
 
       return {
         chunk,
