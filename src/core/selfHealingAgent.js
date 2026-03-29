@@ -25,7 +25,7 @@ const MAX_ATTEMPTS = 3;
 // Catches sqlite3, better-sqlite3, any prebuild-install/gyp failure on ARM64
 const TERMUX_NATIVE_FAIL = /sqlite3.*prebuild-install|prebuild-install.*sqlite3|Cannot find module 'ini'|Cannot find module 'simple-concat'|Cannot find module 'readable-stream'|better-sqlite3.*prebuild|prebuild-install.*better-sqlite3|android_ndk_path|Undefined variable android_ndk_path/;
 const TERMUX_ESBUILD_FAIL = /Cannot find package.*esbuild|ERR_MODULE_NOT_FOUND.*esbuild/;
-// Invalid semver in package.json (AI writes bad version strings like "^1.0.0" in version field)
+// Bad semver anywhere in package.json (AI writes "version":"^1.0.0" or empty dep versions)
 const NPM_INVALID_VERSION = /npm error Invalid Version|invalid version|Invalid SemVer/i;
 
 // Error patterns that indicate something fixable
@@ -136,11 +136,14 @@ class SelfHealingAgent {
     return { success: false, output: "", attempts: attempt };
   }
 
-  // ── Termux / platform-specific known fixes (called before AI) ────────────
+  // ── Termux / platform-specific known fixes ────────────────────────────────
   async _applyTermuxKnownFix(errorOutput, workDir) {
 
-    // ── npm error Invalid Version — bad version string in package.json ────────
-    // Happens when AI writes "version": "^1.0.0" or uses smart quotes.
+    // ── npm error Invalid Version ─────────────────────────────────────────────
+    // The AI writes broken semver in package.json in two ways:
+    //   1. "version": "^1.0.0"  — range prefix in the top-level version field
+    //   2. "express": ""         — empty string / null in a dependency version
+    // We fix EVERY version string in the entire file, not just one field.
     if (NPM_INVALID_VERSION.test(errorOutput)) {
       const pkgPath = path.join(workDir, "package.json");
       if (!fs.existsSync(pkgPath)) return false;
@@ -148,43 +151,61 @@ class SelfHealingAgent {
       let raw = fs.readFileSync(pkgPath, "utf8");
       let pkg;
 
-      // First try to parse — if JSON is invalid, try to auto-fix common AI mistakes
+      // Try to parse; fix smart-quotes first if needed
       try {
         pkg = JSON.parse(raw);
       } catch {
-        // Replace smart quotes with regular quotes and try again
-        raw = raw
-          .replace(/[\u2018\u2019]/g, "'")
-          .replace(/[\u201C\u201D]/g, '"');
-        try { pkg = JSON.parse(raw); } catch { return false; }
+        raw = raw.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+        try { pkg = JSON.parse(raw); } catch {
+          renderer.agentLog("system", "warn", "package.json is unparseable — cannot auto-fix");
+          return false;
+        }
       }
 
-      // Fix version field — strip any semver range prefix (^, ~, >=, etc.)
-      if (pkg.version) {
-        pkg.version = pkg.version.replace(/^[^0-9]*/, "").replace(/[^0-9.]/g, "") || "1.0.0";
-        if (!/^\d+\.\d+\.\d+/.test(pkg.version)) pkg.version = "1.0.0";
-      } else {
-        pkg.version = "1.0.0";
+      let changed = false;
+
+      // Fix top-level "version" — must be plain semver, no range prefix
+      const origVer = pkg.version || "";
+      if (!origVer || /^[^0-9]/.test(origVer) || !/^\d+\.\d+\.\d+/.test(origVer.replace(/^[^0-9]*/, ""))) {
+        const fixed = origVer.replace(/^[^0-9]*/, "").replace(/[^0-9.]/g, "") || "1.0.0";
+        const clean = /^\d+\.\d+\.\d+/.test(fixed) ? fixed : "1.0.0";
+        renderer.agentLog("file", "warn",
+          `package.json version "${origVer}" is not valid semver → "${clean}"`);
+        pkg.version = clean;
+        changed = true;
       }
 
-      // Fix dependency version strings — npm range prefixes are valid there, but
-      // clean up any completely broken ones like empty strings or just "^"
-      for (const section of ["dependencies", "devDependencies"]) {
-        if (!pkg[section]) continue;
+      // Fix all dependency version strings
+      // Valid: "^1.0.0", "~1.0.0", "1.0.0", ">=1.0.0", "*", "latest", "next"
+      // Invalid: "", null, undefined, "^", "~", "^latest" (last one is edge case)
+      const VALID_DEP_VERSION = /^(\*|latest|next|>=?|<=?|~|\^)?[0-9]|^\*$|^latest$|^next$/;
+      for (const section of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        if (!pkg[section] || typeof pkg[section] !== "object") continue;
         for (const [dep, ver] of Object.entries(pkg[section])) {
-          if (typeof ver !== "string" || ver.trim() === "" || ver.trim() === "^") {
+          const v = String(ver || "").trim();
+          if (v === "" || v === "^" || v === "~" || v === "null" || v === "undefined") {
+            renderer.agentLog("file", "warn",
+              `package.json ${section}.${dep} has invalid version "${v}" → "latest"`);
             pkg[section][dep] = "latest";
+            changed = true;
           }
         }
       }
 
+      if (!changed) {
+        renderer.agentLog("system", "warn",
+          "package.json looks valid but npm still says Invalid Version — dumping content for debug:");
+        renderer.agentLog("system", "info", JSON.stringify(pkg).slice(0, 200));
+        return false;
+      }
+
       fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2), "utf8");
-      renderer.agentLog("file", "edit", `package.json — sanitized version field to "${pkg.version}"`);
+      renderer.agentLog("file", "edit", `package.json — sanitized all version strings`);
       return true;
     }
 
-    // ── sqlite3 / better-sqlite3 — both need NDK, never available on Termux ──
-    // Switch to sql.js: pure JS/WASM, zero native compilation, works everywhere.
+    // ── sqlite3 / better-sqlite3 — both require Android NDK, never on Termux ─
+    // The ONLY working option: sql.js (pure JS/WASM, zero native compilation).
     if (TERMUX_NATIVE_FAIL.test(errorOutput)) {
       const pkgPath = path.join(workDir, "package.json");
       if (!fs.existsSync(pkgPath)) return false;
@@ -196,9 +217,9 @@ class SelfHealingAgent {
       const hasBetterSqlite3 = pkg.dependencies?.["better-sqlite3"] || pkg.devDependencies?.["better-sqlite3"];
 
       if (!hasSqlite3 && !hasBetterSqlite3) {
-        // Transitive dep failure — wipe both bad node_modules dirs and retry
+        // Transitive dep failure — wipe both bad node_modules dirs and retry bare
         renderer.agentLog("system", "warn",
-          "Native addon compile failure (transitive dep) — cleaning broken node_modules");
+          "Native addon compile failure (transitive) — wiping broken node_modules entries");
         for (const bad of ["sqlite3", "better-sqlite3"]) {
           const badDir = path.join(workDir, "node_modules", bad);
           try { if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true }); } catch {}
@@ -207,9 +228,9 @@ class SelfHealingAgent {
       }
 
       renderer.agentLog("system", "warn",
-        "sqlite3/better-sqlite3 require Android NDK — not available in Termux. Switching to sql.js (pure JS)");
+        "sqlite3/better-sqlite3 require Android NDK — not present in Termux. Switching to sql.js (pure JS/WASM)");
 
-      // Patch package.json: remove both native variants, add sql.js
+      // Remove both native variants, add sql.js
       for (const section of ["dependencies", "devDependencies"]) {
         if (!pkg[section]) continue;
         delete pkg[section].sqlite3;
@@ -226,7 +247,7 @@ class SelfHealingAgent {
         try { if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true }); } catch {}
       }
 
-      // Rewrite server files to sql.js API
+      // Rewrite server files that import the native packages
       const candidates = ["server.js", "index.js", "app.js", "db.js", "database.js", "src/db.js"];
       for (const c of candidates) {
         const fp = path.join(workDir, c);
@@ -241,7 +262,7 @@ class SelfHealingAgent {
       return true;
     }
 
-    // ── esbuild ARM binary missing (Vite on Termux Node 22+) ───────────────
+    // ── esbuild ARM binary missing (Vite on Termux Node 22+) ─────────────────
     if (TERMUX_ESBUILD_FAIL.test(errorOutput)) {
       renderer.agentLog("system", "warn",
         "esbuild ARM binary missing — attempting force reinstall");
@@ -252,7 +273,7 @@ class SelfHealingAgent {
         return true;
       } catch {
         renderer.agentLog("system", "warn",
-          "esbuild reinstall failed — Vite may not work on this Termux/Node version");
+          "esbuild reinstall failed — Vite does not work on Termux Node 22+. Use plain HTML/JS.");
         return false;
       }
     }
@@ -260,8 +281,7 @@ class SelfHealingAgent {
     return false;
   }
 
-  // ── Convert sqlite3 / better-sqlite3 to sql.js async API ─────────────────
-  // sql.js is pure JS (WASM), zero native compilation, works on any Node/ARM.
+  // ── Convert sqlite3 / better-sqlite3 imports to sql.js ───────────────────
   _convertToSqlJs(content) {
     let c = content;
     c = c.replace(
@@ -270,14 +290,14 @@ class SelfHealingAgent {
     );
     c = c.replace(
       /(?:const\s+\w+\s*=\s*)?new\s+(?:\w+\.)?Database\([^)]*\)(?:,\s*(?:function\s*)?\([^)]*\)\s*\{[^}]*\})?;?/g,
-      "// sql.js: call initSqlJs().then(SQL => { db = new SQL.Database(); }) before using db"
+      "// sql.js: await initSqlJs() then: const db = new SQL.Database();"
     );
     c = c.replace(/\w+\.serialize\s*\(\s*(?:function\s*)?\(\s*\)\s*\{/g, "{");
     return c;
   }
 
-  // ── Convert sqlite3 callback-style to better-sqlite3 sync style ───────────
-  // DEPRECATED — better-sqlite3 also fails on Termux ARM. Kept for reference only.
+  // ── Convert sqlite3 to better-sqlite3 (DEPRECATED — kept for reference) ──
+  // better-sqlite3 also fails on Termux ARM. Use _convertToSqlJs instead.
   _convertSqlite3ToBetter(content) {
     let c = content;
 
@@ -341,20 +361,15 @@ ${filesContext}
 ${ctx}
 
 TERMUX RULES (critical — these apply to ALL fixes):
-- NEVER suggest sqlite3 — requires node-gyp + Android NDK. ALWAYS fails on Termux ARM.
-- NEVER suggest better-sqlite3 — SAME PROBLEM. Also uses node-gyp + NDK. Also always fails.
-- FOR SQLITE/DATABASE: ONLY use "sql.js" (npm install sql.js). Pure JS/WASM, zero native compilation.
-  sql.js usage pattern:
-    const initSqlJs = require('sql.js');
-    let db;
-    async function initDb() { const SQL = await initSqlJs(); db = new SQL.Database(); db.run('CREATE TABLE IF NOT EXISTS ...'); }
-    initDb();
-    // Insert: db.run('INSERT INTO t VALUES (?,?)', [a, b]);
-    // Query:  const res = db.exec('SELECT * FROM t'); const rows = res[0]?.values.map(r => Object.fromEntries(res[0].columns.map((c,i)=>[c,r[i]]))) || [];
-- If error is "Cannot find module 'ini'" / "simple-concat" / "android_ndk_path" — a native addon is broken. Replace it with pure-JS alternative.
-- If error is "npm error Invalid Version" — the package.json "version" field has a semver range prefix (like "^1.0.0"). Fix it: "version" must be exactly "1.0.0" (no ^ or ~ prefix).
-- NEVER use vite, parcel, webpack — use plain HTML+CSS+JS in public/ served by Express.
-- npm install --ignore-scripts can bypass failed postinstall hooks.
+- NEVER use sqlite3 — requires node-gyp + Android NDK, always fails on Termux ARM.
+- NEVER use better-sqlite3 — SAME PROBLEM. Also uses NDK. Do NOT suggest it.
+- FOR DATABASE: ONLY use "sql.js" (npm install sql.js). Pure JS/WASM, zero native.
+  sql.js usage: const initSqlJs = require('sql.js'); initSqlJs().then(SQL => { const db = new SQL.Database(); db.run('CREATE TABLE...'); });
+  Query: const res = db.exec('SELECT * FROM t'); rows = res[0]?.values.map(r=>Object.fromEntries(res[0].columns.map((c,i)=>[c,r[i]]))) || [];
+- "Cannot find module 'ini'" / "simple-concat" / "android_ndk_path" — native addon broken. Replace with pure-JS alternative.
+- "npm error Invalid Version" — package.json has a broken version string. The "version" field must be plain semver "1.0.0" (no ^ or ~ prefix). Dependency versions like "^4.18.2" are fine. Empty strings "" or just "^" are NOT fine — fix them to "latest".
+- NEVER use vite/parcel/webpack — use plain HTML+CSS+JS in public/ served by Express.
+- npm install --ignore-scripts bypasses failed postinstall hooks.
 
 RULES:
 - Output ONLY a valid JSON array of patch objects — no prose, no markdown outside the array.

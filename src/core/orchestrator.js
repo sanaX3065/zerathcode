@@ -46,32 +46,55 @@ const PREVIEW_LINES = 25;
 const SYSTEM_PROMPTS = {
 
   // ── CHAT ──────────────────────────────────────────────────────────────────
-  chat: `You are ZerathCode Chat Agent — a precise coding assistant running in Termux on Android.
+  chat: `You are ZerathCode Chat Agent — a knowledgeable assistant and coding expert running in Termux on Android.
+You have access to a web_fetch tool that lets you retrieve live data from the internet.
 
-ABSOLUTE RULES:
-1. Respond with ONLY a valid JSON array. Nothing before or after it.
-2. Every response starts with [ and ends with ].
-3. Answer exactly what the user asked. No extra advice.
-4. Do NOT create files unless user says "create a file" or "save this".
-5. Do NOT run commands unless asked.
+TOOL USE RULES:
+- For questions about real-time data (stock prices, live news, current events, weather, crypto prices, sports scores) — ALWAYS use web_fetch FIRST to get current information before answering.
+- For questions about recent events you may not know (past 1-2 years) — use web_fetch to verify.
+- For stable facts (code concepts, math, history, general knowledge) — answer directly without web_fetch.
+- After receiving web_fetch results, synthesise them into a clear, direct answer. NEVER say "I cannot access real-time data" — you CAN via web_fetch.
 
-RESPONSE FORMAT:
+HOW TO SEARCH THE WEB:
+Use Google search URLs to find information:
+  web_fetch("https://www.google.com/search?q=QUERY")
+Use direct URLs when you know them:
+  web_fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot")
+  web_fetch("https://finance.yahoo.com/quote/NVDA")
 
-Simple answer:
+RESPONSE FORMAT — ONLY valid JSON arrays, nothing else:
+
+To answer directly:
 [
-  { "action": "message", "params": { "text": "Your answer here" } }
+  { "action": "message", "params": { "text": "Your complete answer here." } }
 ]
 
-Code with file:
+To search first, then answer:
 [
-  { "action": "message",     "params": { "text": "Here is how it works." } },
-  { "action": "create_file", "params": { "path": "example.js", "content": "// full code" } }
+  { "action": "web_fetch", "params": { "url": "https://www.google.com/search?q=bitcoin+price+INR+today" } }
 ]
+Then in the NEXT turn (after results are injected), answer:
+[
+  { "action": "message", "params": { "text": "Based on the search results: Bitcoin is currently trading at ₹X..." } }
+]
+
+To create a file when asked:
+[
+  { "action": "message",     "params": { "text": "Here is the code:" } },
+  { "action": "create_file", "params": { "path": "example.js", "content": "// full code here" } }
+]
+
+RULES:
+1. Respond with ONLY a valid JSON array — nothing before or after the [ ].
+2. Do NOT create files unless user explicitly asks to save/create a file.
+3. Do NOT run commands unless asked.
+4. When web results are injected into your context as [WEB RESULTS], use them to answer — do not search again.
+5. Be concise and direct. Answer the actual question asked.
 
 AVAILABLE ACTIONS: message, create_file, read_file, web_fetch`,
 
   // ── FULL STACK ────────────────────────────────────────────────────────────
-  fullstack: `You are ZerathCode Full Stack Agent — an autonomous web application builder for Termux/Android (ARM64, Node.js v22+).
+  fullstack: `You are ZerathCode Full Stack Agent — an autonomous web application builder for Termux/Android.
 
 YOUR ONLY JOB: Build complete, immediately runnable web applications.
 
@@ -79,36 +102,15 @@ ABSOLUTE RULES:
 1. Respond with ONLY a valid JSON array — no text before or after it.
 2. EVERY response MUST start with a "plan" action listing ALL files you will create.
 3. Create EVERY file with 100% complete code — no placeholders, no TODOs.
-4. Tech stack rules (Termux has NO complex build tools):
-   - Frontend: vanilla HTML5 + CSS3 + vanilla JavaScript ONLY in public/ directory
-   - Backend:  Node.js with express (serve public/ as static folder)
-   - React/Vue: ONLY via CDN <script> tags in HTML — NEVER via npm install
-   - Start command: ALWAYS "node server.js" — NEVER vite, parcel, or webpack
-5. PACKAGE.JSON RULES — CRITICAL:
-   - "version" field MUST be a plain semver string: "1.0.0" — NEVER use "^1.0.0" or "~1.0.0" in the version field
-   - dependency versions CAN use ^ prefix: "express": "^4.18.2" is correct
-   - "scripts.start" must be: "node server.js" — nothing else
-6. DATABASE RULES — CRITICAL:
-   - NEVER use "sqlite3" package — requires Android NDK, ALWAYS fails on Termux ARM
-   - NEVER use "better-sqlite3" — SAME PROBLEM, also fails. Do not use it.
-   - FOR SQLITE: ONLY use "sql.js" package. It is pure JavaScript/WASM, zero native compilation.
-   - sql.js pattern:
-       const initSqlJs = require('sql.js');
-       let db;
-       async function initDb() {
-         const SQL = await initSqlJs();
-         db = new SQL.Database();
-         db.run('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
-       }
-       initDb();
-       // Insert: db.run('INSERT INTO users VALUES (NULL, ?)', ['alice']);
-       // Query:  const res = db.exec('SELECT * FROM users');
-       //         const rows = res[0] ? res[0].values.map(r => Object.fromEntries(res[0].columns.map((c,i)=>[c,r[i]]))) : [];
-7. Write syntactically valid JavaScript — every { must have }, every ( must have ), all template literals use backticks.
-8. Last steps MUST be: npm install, then node server.js (background: true)
-9. Add .gitignore that excludes node_modules and .env
-10. End with a memory_note describing what was built
-11. All paths are relative to the project directory
+4. Tech stack rules (Termux has no complex build tools):
+   - Frontend: vanilla HTML5 + CSS3 + vanilla JavaScript ONLY
+   - Backend:  Node.js with built-in http module OR express
+   - React: ONLY via CDN <script> tags in HTML. Never via npm install.
+   - Start command: ALWAYS "node server.js" — never parcel, vite, or webpack
+5. Last steps MUST be: npm install (if express used) then node server.js
+6. Add .gitignore that excludes node_modules
+7. End with a memory_note describing what was built
+8. All paths are relative to the project directory
 
 REQUIRED STRUCTURE (copy this pattern every time):
 [
@@ -354,55 +356,93 @@ class Orchestrator {
     }
   }
 
-  // ── Process one user turn ─────────────────────────────────────────────────
+  // ── Process one user turn — agentic loop ─────────────────────────────────
+  // For chat mode: model can call web_fetch tools, results are injected back,
+  // and model gets another chance to synthesise a final answer.
+  // For all other modes: single-pass execution (model returns full plan at once).
   async process(userInput) {
     this.memory.addUserMessage(userInput);
     renderer.userMessage(userInput);
 
-    const systemPrompt = this._buildSystemPrompt();
-    const prompt       = this._buildPrompt(userInput);
+    const isChatMode = this.mode === "chat" || this.mode === "fullai";
+    const MAX_AGENT_LOOPS = isChatMode ? 5 : 1;
 
-    renderer.agentLog("ai", "info", `Thinking with ${this.provider}…`);
+    const systemPrompt  = this._buildSystemPrompt();
+    this._filesCreated  = 0;
 
-    let raw;
-    try {
-      raw = await this.ai.ask(this.provider, prompt, {
-        systemPrompt,
-        maxTokens: 8192,
-      });
-    } catch (err) {
-      renderer.errorBox("AI Error", err.message);
-      this.memory.logError("ai", err.message);
-      return;
-    }
-
-    const steps = this._parseSteps(raw);
-
-    if (!steps || steps.length === 0) {
-      // Plain text fallback — display it
-      renderer.aiMessage(raw.slice(0, 3000), this.provider);
-      this.memory.addAssistantMessage(raw.slice(0, 500));
-      return;
-    }
-
-    // Reset file counter for this turn
-    this._filesCreated = 0;
-
-    // Execute all steps
+    // Tool results accumulate across loops (url → content)
+    const toolResults   = [];
     let assistantSummary = "";
-    for (const step of steps) {
-      const result = await this._executeStep(step);
-      if (step.action === "message" || step.action === "ask_user") {
-        assistantSummary += (result || "") + "\n";
+    let loopCount       = 0;
+    let gotFinalAnswer  = false;
+
+    while (loopCount < MAX_AGENT_LOOPS && !gotFinalAnswer) {
+      loopCount++;
+
+      // Build prompt — inject tool results into context on subsequent loops
+      const prompt = toolResults.length > 0
+        ? this._buildPromptWithResults(userInput, toolResults)
+        : this._buildPrompt(userInput);
+
+      renderer.agentLog("ai", "info",
+        loopCount === 1
+          ? `Thinking with ${this.provider}…`
+          : `${this.provider} processing results (loop ${loopCount})…`);
+
+      let raw;
+      try {
+        raw = await this.ai.ask(this.provider, prompt, {
+          systemPrompt,
+          maxTokens: 8192,
+        });
+      } catch (err) {
+        renderer.errorBox("AI Error", err.message);
+        this.memory.logError("ai", err.message);
+        return;
       }
+
+      const steps = this._parseSteps(raw);
+
+      if (!steps || steps.length === 0) {
+        // Plain text fallback
+        renderer.aiMessage(raw.slice(0, 3000), this.provider);
+        this.memory.addAssistantMessage(raw.slice(0, 500));
+        return;
+      }
+
+      // Execute each step — collect tool results for next loop
+      let thisLoopHasToolCalls = false;
+
+      for (const step of steps) {
+        const result = await this._executeStep(step);
+
+        if (step.action === "web_fetch" && result) {
+          toolResults.push({
+            url:     step.params.url || "",
+            content: String(result).slice(0, 3000),
+          });
+          thisLoopHasToolCalls = true;
+          renderer.agentLog("web", "ok",
+            `Result captured (${String(result).length} chars) — feeding back to ${this.provider}`);
+        }
+
+        if (step.action === "message" || step.action === "ask_user") {
+          assistantSummary += (result || "") + "\n";
+          gotFinalAnswer = true;   // model gave a real answer — stop looping
+        }
+      }
+
+      // If this loop only made tool calls and no message yet — continue looping
+      // If no tool calls AND no message — model returned only plan/file steps — stop
+      if (!thisLoopHasToolCalls && !gotFinalAnswer) break;
     }
 
-    // Refresh README after every non-ephemeral turn
+    // Post-processing (only for non-ephemeral modes)
     if (this.mode !== "chat" && this.mode !== "fullai") {
       try { this.memory.writeReadme(); } catch {}
     }
 
-    // Always ensure run.sh exists in fullstack/mobiledev/infra modes
+    // Always ensure run.sh exists in project modes
     if (this.mode === "fullstack" || this.mode === "mobiledev" || this.mode === "infra") {
       this._ensureRunScript();
     }
@@ -458,69 +498,10 @@ class Orchestrator {
             `mkdir ${path.relative(this.workDir, dir) || "."}/`);
         }
 
-        let content = params.content || "";
-        const ext   = path.extname(fp).slice(1).toLowerCase();
-
-        // ── Proactive: intercept sqlite3/better-sqlite3 before it hits disk ───
-        if (/require\(['"](?:sqlite3|better-sqlite3)['"]\)/.test(content)) {
-          renderer.agentLog("file", "warn",
-            `${rel}  ${C.yellow}⚠ sqlite3/better-sqlite3 intercepted — auto-replacing with sql.js${C.reset}`);
-          content = content
-            .replace(
-              /const\s+(\w+)\s*=\s*require\(['"](?:sqlite3|better-sqlite3)['"]\)(?:\.verbose\(\))?;?/g,
-              "const initSqlJs = require('sql.js');"
-            )
-            .replace(
-              /new\s+(?:\w+\.)?Database\([^)]*\)/g,
-              "/* sql.js: await initSqlJs() then new SQL.Database() */"
-            );
-        }
-
-        // ── Proactive: fix package.json version field if AI wrote "^1.0.0" ───
-        if (ext === "json" && (rel === "package.json" || fp.endsWith("package.json"))) {
-          try {
-            const pkg = JSON.parse(content);
-            // "version" must be plain semver — no range prefixes
-            if (pkg.version && /^[^0-9]/.test(pkg.version)) {
-              const fixed = pkg.version.replace(/^[^0-9]*/, "") || "1.0.0";
-              renderer.agentLog("file", "warn",
-                `${rel}  ${C.yellow}⚠ version "${pkg.version}" → "${fixed}" (was not valid semver)${C.reset}`);
-              pkg.version = fixed;
-              content = JSON.stringify(pkg, null, 2);
-            }
-            // Ensure "scripts.start" doesn't invoke vite/webpack/parcel
-            if (pkg.scripts?.start && /vite|webpack|parcel/.test(pkg.scripts.start)) {
-              renderer.agentLog("file", "warn",
-                `${rel}  ${C.yellow}⚠ "npm start" invokes bundler — replacing with "node server.js"${C.reset}`);
-              pkg.scripts.start = "node server.js";
-              content = JSON.stringify(pkg, null, 2);
-            }
-          } catch {} // invalid JSON handled below
-        }
-
-        // ── JS syntax validation ──────────────────────────────────────────────
-        if ((ext === "js" || ext === "mjs" || ext === "cjs") && content.length > 10) {
-          try {
-            const vm = require("vm");
-            new vm.Script(content, { filename: rel });
-          } catch (syntaxErr) {
-            renderer.agentLog("file", "warn",
-              `${rel}  ${C.yellow}⚠ SYNTAX ERROR: ${syntaxErr.message.slice(0, 100)}${C.reset}`);
-            this.memory.logError(rel, `Syntax error in AI-generated JS: ${syntaxErr.message}`);
-            // Still write — user can see and fix, healer will catch on run
-          }
-        }
-
-        // ── JSON validation ───────────────────────────────────────────────────
-        if (ext === "json" && content.length > 0) {
-          try { JSON.parse(content); } catch (jsonErr) {
-            renderer.agentLog("file", "warn",
-              `${rel}  ${C.yellow}⚠ INVALID JSON: ${jsonErr.message.slice(0, 80)}${C.reset}`);
-            this.memory.logError(rel, `Invalid JSON in AI-generated file: ${jsonErr.message}`);
-          }
-        }
-
+        const content = params.content || "";
         fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
+
+        const ext  = path.extname(fp).slice(1).toLowerCase();
         const lang = {
           js: "JavaScript", ts: "TypeScript", kt: "Kotlin", java: "Java",
           py: "Python", html: "HTML", css: "CSS", json: "JSON",
@@ -797,8 +778,9 @@ class Orchestrator {
     }
   }
 
-  // ── Auto dev server — with crash detection and self-healing ─────────────
+  // ── Auto dev server for fullstack mode ─────────────────────────────────────
   async _ensureDevServer() {
+    // If already running, skip
     if (this._devServer) {
       renderer.agentLog("infra", "info",
         `Dev server already running on :${this._devPort}`);
@@ -809,35 +791,22 @@ class Orchestrator {
     const candidates = ["server.js", "index.js", "app.js"]
       .map(f => path.join(this.workDir, f));
     const main = candidates.find(f => fs.existsSync(f));
-    if (!main) {
-      renderer.agentLog("infra", "warn", "No server entry point found (server.js / index.js / app.js)");
-      return;
-    }
+    if (!main) return;
 
-    // Decide start command — prefer "node server.js" over npm start for reliability
+    // Decide start command
     const pkgFile = path.join(this.workDir, "package.json");
     let cmd  = "node";
     let args = [path.basename(main)];
 
-    // Only use npm start if the script is explicitly "node server.js" or similar
-    // Avoids npm start triggering vite/parcel/webpack which fail on Termux
     if (fs.existsSync(pkgFile)) {
       try {
         const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8"));
-        const startScript = pkg.scripts?.start || "";
-        // Only use npm start if it's a plain node invocation, not a bundler
-        if (startScript && /^node\s+/.test(startScript.trim())) {
-          cmd = "npm"; args = ["start"];
-        }
+        if (pkg.scripts?.start) { cmd = "npm"; args = ["start"]; }
       } catch {}
     }
 
     renderer.agentLog("infra", "run",
       `Starting dev server: ${cmd} ${args.join(" ")}  ${C.grey}(port ${this._devPort})${C.reset}`);
-
-    let startupOutput = "";
-    let crashed       = false;
-    let exitCode      = null;
 
     this._devServer = spawn(cmd, args, {
       cwd:   this.workDir,
@@ -847,139 +816,27 @@ class Orchestrator {
 
     let linesShown = 0;
     const onOut = (chunk) => {
-      const text = chunk.toString();
-      startupOutput += text;
-      if (linesShown >= 8) return;
-      text.split("\n").filter(Boolean).forEach((l) => {
-        if (linesShown++ < 8) renderer.agentLog("infra", "ok", l.trim().slice(0, 100));
+      if (linesShown >= 6) return;
+      chunk.toString().split("\n").filter(Boolean).forEach((l) => {
+        if (linesShown++ < 6) renderer.agentLog("infra", "ok", l.trim().slice(0, 80));
       });
     };
     this._devServer.stdout.on("data", onOut);
     this._devServer.stderr.on("data", onOut);
 
     this._devServer.on("close", (code) => {
-      crashed  = code !== 0;
-      exitCode = code;
-      if (code !== 0) {
-        renderer.agentLog("infra", "error",
-          `Dev server CRASHED (exit code ${code}) — sending to self-healer`);
-      } else {
-        renderer.agentLog("infra", "ok", `Dev server stopped cleanly (code 0)`);
-      }
+      renderer.agentLog("infra", code === 0 ? "ok" : "warn",
+        `Dev server exited (code ${code})`);
       this._devServer = null;
     });
 
-    // Wait up to 4s to see if it survives startup
-    await new Promise(r => setTimeout(r, 4000));
+    // Let it breathe for 1.5s before showing the URL
+    await new Promise(r => setTimeout(r, 1500));
 
-    if (crashed || this._devServer === null) {
-      // Server died during startup — print actual crash output clearly
-      const crashLines = startupOutput.split("\n").filter(Boolean);
-      console.log(`\n  ${C.bred}✖  Dev server failed to start (exit ${exitCode ?? "?"}):${C.reset}`);
-      crashLines.slice(-15).forEach(l =>
-        console.log(`  ${C.grey}${l.trim().slice(0, 100)}${C.reset}`)
-      );
-      console.log("");
-
-      // Auto-heal: send crash output to self-healer
-      renderer.agentLog("infra", "warn",
-        "Dev server crash detected — attempting auto-heal…");
-
-      const healResult = await this.healer.run(
-        cmd, args, this.workDir, 60000
-      );
-
-      if (healResult.success) {
-        renderer.agentLog("infra", "ok",
-          "Self-healer fixed the server — restarting dev server…");
-        // Reset and retry once
-        this._devServer = null;
-        await this._ensureDevServer();
-      } else {
-        renderer.agentLog("infra", "error",
-          "Auto-heal could not fix the server. Check errors above and fix manually.");
-        this.memory.logError("devServer", startupOutput.slice(0, 600));
-        // Log crash to memory so next AI turn has context
-        this.memory.addNote(`Dev server crashed on startup: ${crashLines.slice(-3).join(" | ")}`);
-      }
-      return;
-    }
-
-    // Server survived — it's running
     console.log(
-      `\n  ${C.bgreen}▶${C.reset}  Server running at ` +
+      `\n  ${C.bgreen}▶${C.reset}  App running at ` +
       `${C.bcyan}http://localhost:${this._devPort}${C.reset}\n`
     );
-  }
-
-  // ── Ensure run.sh exists for every project turn ───────────────────────────
-  // Creates/updates run.sh with the correct start command.
-  // If a Vite frontend is in /src, run.sh runs backend + frontend together.
-  _ensureRunScript() {
-    const runScript = path.join(this.workDir, "run.sh");
-
-    // Detect what the project has
-    const hasServer    = ["server.js", "index.js", "app.js"].some(f => fs.existsSync(path.join(this.workDir, f)));
-    const hasPublic    = fs.existsSync(path.join(this.workDir, "public"));
-    const hasSrcVite   = fs.existsSync(path.join(this.workDir, "src")) && fs.existsSync(path.join(this.workDir, "vite.config.js"));
-    const hasPkg       = fs.existsSync(path.join(this.workDir, "package.json"));
-
-    let backendCmd = "node server.js";
-    if (hasPkg) {
-      try {
-        const pkg = JSON.parse(fs.readFileSync(path.join(this.workDir, "package.json"), "utf8"));
-        const startScript = pkg.scripts?.start || "";
-        if (startScript && /^node\s+/.test(startScript.trim())) {
-          backendCmd = `npm start`;
-        }
-        const mainEntry = pkg.main || "";
-        if (mainEntry && fs.existsSync(path.join(this.workDir, mainEntry))) {
-          backendCmd = `node ${mainEntry}`;
-        }
-      } catch {}
-    }
-
-    let scriptContent;
-
-    if (hasSrcVite) {
-      // Full-stack with Vite frontend — warn user Vite won't work on Termux
-      scriptContent = `#!/bin/bash
-# ZerathCode — Project Run Script
-# NOTE: Vite frontend detected. On Termux, run backend only (no build step needed for API).
-# For frontend, open public/index.html directly in a browser, or use plain HTML.
-
-set -e
-cd "$(dirname "$0")"
-
-echo "Starting backend server..."
-PORT=\${PORT:-3000} ${backendCmd}
-`;
-    } else {
-      scriptContent = `#!/bin/bash
-# ZerathCode — Project Run Script
-# Run this to start the project: bash run.sh
-
-set -e
-cd "$(dirname "$0")"
-
-# Install dependencies if node_modules is missing
-if [ ! -d "node_modules" ]; then
-  echo "Installing dependencies..."
-  npm install
-fi
-
-echo "Starting server on port \${PORT:-3000}..."
-PORT=\${PORT:-3000} ${backendCmd}
-`;
-    }
-
-    try {
-      fs.writeFileSync(runScript, scriptContent, { encoding: "utf8", mode: 0o755 });
-      renderer.agentLog("file", "create",
-        `run.sh  ${C.grey}(${backendCmd})${C.reset}`);
-    } catch (err) {
-      renderer.agentLog("file", "warn", `Could not write run.sh: ${err.message}`);
-    }
   }
 
   // ── Build system prompt ────────────────────────────────────────────────────
@@ -1006,6 +863,35 @@ PORT=\${PORT:-3000} ${backendCmd}
       .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
       .join("\n\n");
     return `${histText}\n\nUser: ${userInput}`;
+  }
+
+  // ── Build prompt injecting web/tool results back to the model ─────────────
+  // Called on loop 2+ in chat mode after tool calls return results.
+  _buildPromptWithResults(userInput, toolResults) {
+    const history = this.memory.getHistory(6);
+    let histText = "";
+    if (history.length > 1) {
+      histText = history
+        .slice(0, -1)
+        .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+        .join("\n\n") + "\n\n";
+    }
+
+    const resultsBlock = toolResults
+      .map((r, i) =>
+        `[WEB RESULTS ${i + 1}] Source: ${r.url}\n${r.content}`
+      )
+      .join("\n\n---\n\n");
+
+    return (
+      histText +
+      `User: ${userInput}\n\n` +
+      `[WEB RESULTS — use these to answer the user's question directly]\n\n` +
+      resultsBlock +
+      `\n\n[END WEB RESULTS]\n\n` +
+      `Now provide a complete, direct answer using the web results above. ` +
+      `Return a JSON array with a "message" action containing your answer.`
+    );
   }
 
   // ── Parse AI response into step array ──────────────────────────────────────
