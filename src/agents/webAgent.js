@@ -450,14 +450,24 @@ class WebAgent extends BaseAgent {
 
   static _normalizeCandidateUrl(href) {
     try {
-      const h = String(href || "");
-      if (h.startsWith("http://") || h.startsWith("https://")) return h;
+      let h = String(href || "");
+      // HTML search pages often encode query separators.
+      h = h.replace(/&amp;/g, "&");
+      // Protocol-relative URLs are common in DDG HTML results: //duckduckgo.com/l/?uddg=...
+      if (h.startsWith("//")) {
+        return WebAgent._normalizeCandidateUrl("https:" + h);
+      }
+
       // DDG redirect links sometimes look like "/l/?uddg=<encoded>"
-      if (h.startsWith("/l/") && h.includes("uddg=")) {
-        const u = new URL("https://duckduckgo.com" + h);
+      if ((h.startsWith("/l/") || h.includes("duckduckgo.com/l/")) && h.includes("uddg=")) {
+        const u = h.startsWith("/l/")
+          ? new URL("https://duckduckgo.com" + h)
+          : new URL(h);
         const raw = u.searchParams.get("uddg");
         if (raw) return decodeURIComponent(raw);
       }
+
+      if (h.startsWith("http://") || h.startsWith("https://")) return h;
     } catch {}
     return null;
   }
