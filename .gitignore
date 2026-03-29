@@ -1,1 +1,51 @@
 node_modules
+
+# Gradle files
+.gradle/
+build/
+
+# Kotlin/Java compiled files
+*.class
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android Studio / IntelliJ
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+captures/
+
+# Local configuration file (contains system-specific paths)
+local.properties
+
+# Log files
+*.log
+
+# Android Profiler
+*.hprof
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Built variants
+/app/build/
+
+# Signing files
+*.jks
+*.keystore
+
+# Google Services
+# google-services.json

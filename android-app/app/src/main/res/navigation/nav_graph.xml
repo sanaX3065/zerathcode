@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/chatFragment">
+
+    <fragment
+        android:id="@+id/chatFragment"
+        android:name="com.localai.automation.ui.chat.ChatFragment"
+        android:label="Chat" />
+
+    <fragment
+        android:id="@+id/dashboardFragment"
+        android:name="com.localai.automation.ui.dashboard.DashboardFragment"
+        android:label="Dashboard" />
+
+    <fragment
+        android:id="@+id/permissionsFragment"
+        android:name="com.localai.automation.ui.permissions.PermissionsFragment"
+        android:label="Permissions" />
+
+    <fragment
+        android:id="@+id/locationsFragment"
+        android:name="com.localai.automation.ui.locations.LocationsFragment"
+        android:label="Zones" />
+
+    <fragment
+        android:id="@+id/rulesFragment"
+        android:name="com.localai.automation.ui.rules.RulesFragment"
+        android:label="Rules" />
+
+</navigation>

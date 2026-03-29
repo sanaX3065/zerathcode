@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Local AI Agent</string>
+    <string name="notification_listener_label">AI Agent Notification Listener</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_permissions">Permissions</string>
+    <string name="nav_locations">Zones</string>
+    <string name="nav_rules">Rules</string>
+    <string name="hint_message">Type a command or question…</string>
+    <string name="btn_send">Send</string>
+    <string name="empty_chat">Send a message to create your first automation rule.\n\nExamples:\n• "When battery is low, set silent mode"\n• "When charging starts, increase brightness"\n• "When I enter Home zone, set vibrate"</string>
+    <string name="empty_events">No events captured yet.\nStart the runtime and grant permissions.</string>
+    <string name="empty_actions">No actions executed yet.</string>
+    <string name="empty_locations">No zones added yet.\nTap + to add a geofence zone.</string>
+    <string name="empty_rules">No rules yet.\nCreate rules via the Chat tab.</string>
+    <string name="notification_listener_description">Allows Local AI Agent to monitor notifications for automation triggers</string>
+    <string name="oem_guidance_title">Device Compatibility Notice</string>
+    <string name="battery_optimization_title">Battery Optimization</string>
+</resources>
