@@ -140,6 +140,84 @@ class WebAgent extends BaseAgent {
     };
   }
 
+  /**
+   * Search + scrape + chunk + similarity select (RAG-style).
+   * This is the preferred "query-only web_fetch" path for chat.
+   *
+   * @param {string} query
+   * @param {{timeoutMs?: number, maxChars?: number, userAgent?: string, maxSites?: number}} opts
+   */
+  static async searchAndRag(query, opts = {}) {
+    const q = String(query || "").trim();
+    const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
+    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 5;
+    if (!q) {
+      return { ok: false, status: 400, statusText: "Bad Request", url: "", text: "(no query provided)", rawSize: 0, textSize: 0, sources: [] };
+    }
+
+    let urls = [];
+    try {
+      urls = await WebAgent._duckDuckGoHtmlUrls(q, opts);
+    } catch {
+      urls = [];
+    }
+
+    if (urls.length === 0) {
+      urls = WebAgent._inferAuthoritativeUrls(q);
+    }
+
+    urls = urls.slice(0, maxSites);
+
+    const pages = [];
+    const sources = [];
+
+    // Fetch sequentially to keep Termux/network usage predictable.
+    for (const u of urls) {
+      try {
+        const page = await WebAgent.fetchText(u, {
+          ...opts,
+          // Give the chunker enough room; final output is trimmed later.
+          maxChars: 18000,
+          minChars: 350,
+        });
+        if (page && page.text && page.text.length > 250) {
+          pages.push({ url: u, text: page.text });
+          sources.push(u);
+        }
+      } catch {
+        // ignore one bad page
+      }
+    }
+
+    const selected = WebAgent._selectTopRagChunks(pages, q, {
+      maxChunks: 10,
+      maxPerSource: 3,
+      chunkSize: 900,
+      overlap: 140,
+      snippetChars: 520,
+    });
+
+    const header = [
+      `RAG query: ${q}`,
+      `Sources (${sources.length}/${maxSites}):`,
+      ...sources.map((s) => `- ${s}`),
+      "",
+      "Top relevant excerpts:",
+      "",
+    ].join("\n");
+
+    const body = selected.length
+      ? selected.map((c, i) => {
+        const src = c.source;
+        const score = c.score;
+        return `(${i + 1}) [${score}] ${src}\n${c.text}`;
+      }).join("\n\n")
+      : "(no relevant excerpts found)";
+
+    const text = (header + body).slice(0, maxOut);
+    return { ok: true, status: 200, statusText: "OK", url: WebAgent.googleSearchUrl(q), text, rawSize: text.length, textSize: text.length, sources };
+  }
+
   static _jinaUrl(url) {
     const u = String(url || "");
     if (u.startsWith("https://r.jina.ai/")) return u;
@@ -312,6 +390,47 @@ class WebAgent extends BaseAgent {
     const out = [];
     for (const { c } of scored) {
       out.push(WebAgent._compactSnippet(c, snippetChars));
+    }
+    return out;
+  }
+
+  static _selectTopRagChunks(pages, query, cfg = {}) {
+    const maxChunks = Number.isFinite(cfg.maxChunks) ? cfg.maxChunks : 10;
+    const maxPerSource = Number.isFinite(cfg.maxPerSource) ? cfg.maxPerSource : 3;
+    const chunkSize = Number.isFinite(cfg.chunkSize) ? cfg.chunkSize : 900;
+    const overlap = Number.isFinite(cfg.overlap) ? cfg.overlap : 140;
+    const snippetChars = Number.isFinite(cfg.snippetChars) ? cfg.snippetChars : 520;
+
+    const tokens = WebAgent._queryTokens(query);
+    if (!tokens.length) return [];
+
+    const candidates = [];
+    for (const p of Array.isArray(pages) ? pages : []) {
+      const src = p && p.url ? String(p.url) : "";
+      const text = p && p.text ? String(p.text) : "";
+      if (!src || !text) continue;
+      const chunks = WebAgent._chunkText(text, chunkSize, overlap);
+      for (const ch of chunks) {
+        const score = WebAgent._scoreChunk(ch, tokens);
+        if (score <= 0) continue;
+        candidates.push({
+          source: src,
+          score,
+          text: WebAgent._compactSnippet(ch, snippetChars),
+        });
+      }
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+
+    const per = new Map();
+    const out = [];
+    for (const c of candidates) {
+      const n = per.get(c.source) || 0;
+      if (n >= maxPerSource) continue;
+      out.push(c);
+      per.set(c.source, n + 1);
+      if (out.length >= maxChunks) break;
     }
     return out;
   }

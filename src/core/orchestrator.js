@@ -57,15 +57,9 @@ TOOL USE RULES:
 - For stable facts (code concepts, math, history, general knowledge) — answer directly without web_fetch.
 - After receiving web_fetch results, synthesise them into a clear, direct answer. NEVER say "I cannot access real-time data" — you CAN via web_fetch.
 
-HOW TO SEARCH THE WEB:
-Use Google search URLs to find information:
-  web_fetch("https://www.google.com/search?q=QUERY")
-Use direct URLs when you know them:
-  web_fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot")
-  web_fetch("https://finance.yahoo.com/quote/NVDA")
-
-TIP:
-- When calling web_fetch, include a "query" string so the tool can extract only the most relevant excerpts from the page(s).
+HOW TO USE WEB_FETCH:
+- Prefer query-based fetch (recommended): the tool will search the web, scrape the first results, chunk them, and return only the most relevant excerpts.
+- Use url-based fetch only when you already know the exact page you want.
 
 RESPONSE FORMAT — ONLY valid JSON arrays, nothing else:
 
@@ -76,7 +70,7 @@ To answer directly:
 
 To search first, then answer:
 [
-  { "action": "web_fetch", "params": { "url": "https://www.google.com/search?q=bitcoin+price+INR+today", "query": "bitcoin price INR today" } }
+  { "action": "web_fetch", "params": { "query": "bitcoin price INR today" } }
 ]
 Then in the NEXT turn (after results are injected), answer:
 [
@@ -430,14 +424,11 @@ class Orchestrator {
 
         if (hasMessage && !hasWebFetch) {
           forcedWebOnce = true;
-          const urls = WebAgent.autoFetchUrls(userInput);
-          for (const url of urls) {
-            const text = await this._executeStep({ action: "web_fetch", params: { url, query: userInput } });
-            if (text) {
-              toolResults.push({ url, content: String(text).slice(0, 3000) });
-              renderer.agentLog("web", "ok",
-                `Result captured (${String(text).length} chars) — feeding back to ${this.provider}`);
-            }
+          const text = await this._executeStep({ action: "web_fetch", params: { query: userInput } });
+          if (text) {
+            toolResults.push({ url: `query: ${userInput}`.slice(0, 140), content: String(text).slice(0, 3000) });
+            renderer.agentLog("web", "ok",
+              `Result captured (${String(text).length} chars) — feeding back to ${this.provider}`);
           }
           // Now that we have results, re-loop so the model answers based on [WEB RESULTS].
           continue;
@@ -456,8 +447,11 @@ class Orchestrator {
         const result = await this._executeStep(step, { silent, query: userInput });
 
         if (step.action === "web_fetch" && result) {
+          const metaUrl =
+            step.params.url ||
+            (step.params.query ? `query: ${String(step.params.query).slice(0, 140)}` : "web_fetch");
           toolResults.push({
-            url:     step.params.url || "",
+            url:     metaUrl,
             content: String(result).slice(0, 3000),
           });
           thisLoopHasToolCalls = true;
@@ -715,15 +709,24 @@ class Orchestrator {
 
       // ── web_fetch ─────────────────────────────────────────────────────────
       case "web_fetch": {
-        if (!params.url) return null;
-        renderer.agentLog("web", "info", `Fetching ${params.url}`);
-        this.memory.logAction("web", "fetch", params.url);
+        const q = params.query || opts.query || "";
+        const label = params.url ? params.url : (q ? `query: ${String(q).slice(0, 80)}` : "");
+        if (!params.url && !q) return null;
+
+        renderer.agentLog("web", "info", params.url ? `Fetching ${params.url}` : `Searching ${String(q).slice(0, 80)}`);
+        this.memory.logAction("web", "fetch", label || "(web_fetch)");
         try {
-          const q = params.query || opts.query || "";
-          const out = await WebAgent.fetchRelevant(params.url, q, {
+          const out = params.url
+            ? await WebAgent.fetchRelevant(params.url, q, {
+              timeoutMs: 15000,
+              maxChars:  3000,
+              userAgent: "ZerathCode/1.0",
+            })
+            : await WebAgent.searchAndRag(q, {
             timeoutMs: 15000,
             maxChars:  3000,
             userAgent: "ZerathCode/1.0",
+            maxSites:  5,
           });
           const srcCount = Array.isArray(out.sources) ? out.sources.length : 0;
           renderer.agentLog(
