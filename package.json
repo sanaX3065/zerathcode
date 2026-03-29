@@ -17,5 +17,9 @@
     "start": "node bin/zerathcode.js run",
     "link": "npm link"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@xenova/transformers": "^2.13.5",
+    "htmlparser2": "^9.1.0",
+    "natural": "^6.10.0"
+  }
 }

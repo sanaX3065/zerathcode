@@ -63,7 +63,15 @@ HOW TO USE WEB_FETCH:
 
 MULTI-PART QUESTIONS:
 - If the question has multiple topics (e.g., "N+1" AND "SQL injection"), you can call web_fetch multiple times with different queries.
-- If you call web_fetch multiple times (even 5 times), each call will scrape up to 5 sites and return the top relevant chunks.
+- If you call web_fetch multiple times (even 5 times), each call will scrape up to 12 sites and return the top relevant chunks.
+
+GROUNDING & PRECISION REQUIREMENTS:
+- CRITICAL: All factual claims MUST be grounded in retrieved context OR your training knowledge.
+- When using web_fetch results, cite them: "According to [source name]..." or "The docs state..."
+- If data is insufficient, explicitly state: "I don't have enough information to answer confidently" — do NOT fabricate.
+- Report confidence levels: (high confidence), (medium confidence), (low confidence - verify independently)
+- For technical facts: always include version numbers, dates, and source URLs when available.
+- Never claim knowledge of unreleased features, model versions, or future events.
 
 RESPONSE FORMAT — ONLY valid JSON arrays, nothing else:
 
@@ -93,6 +101,7 @@ RULES:
 3. Do NOT run commands unless asked.
 4. When web results are injected into your context as [WEB RESULTS], use them to answer — do not search again.
 5. Be concise and direct. Answer the actual question asked.
+6. GROUND all non-trivial facts. Unfounded claims will be rejected.
 
 AVAILABLE ACTIONS: message, create_file, read_file, web_fetch`,
 
@@ -723,16 +732,22 @@ class Orchestrator {
           const out = params.url
             ? await WebAgent.fetchRelevant(params.url, q, {
               timeoutMs: 15000,
-              maxChars:  3000,
+              maxChars:  8000,  // Increased from 3000 for better context
               userAgent: "ZerathCode/1.0",
             })
             : await WebAgent.searchAndRag(q, {
             timeoutMs: 15000,
-            maxChars:  3000,
+            maxChars:  8000,  // Increased from 3000 for better context
             userAgent: "ZerathCode/1.0",
-            maxSites:  5,
+            maxSites:  12,  // Increased from 5 for source diversity
           });
           const srcCount = Array.isArray(out.sources) ? out.sources.length : 0;
+          
+          // Store retrieval metadata for grounding
+          if (this.memory && srcCount > 0) {
+            this.memory.addNote(`Retrieved from ${srcCount} source(s): ${out.sources.slice(0, 3).join(", ")}`);
+          }
+          
           renderer.agentLog(
             "web",
             "ok",

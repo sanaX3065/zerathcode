@@ -17,25 +17,39 @@
 const BaseAgent          = require("./baseAgent");
 const { withSpinner }    = require("../utils/spinner");
 const AiClient           = require("../utils/aiClient");
+const DomParser          = require("../utils/domParser");
+const EmbeddingManager   = require("../core/embeddingManager");
+const SourceEvaluator    = require("../core/sourceEvaluator");
+const QueryReasoner      = require("../core/queryReasoner");
 const fs                 = require("fs");
 const path               = require("path");
 
 class WebAgent extends BaseAgent {
   // ── Programmatic API (used by Orchestrator) ───────────────────────────────
   // These methods MUST NOT print to stdout or call process.exit().
+  
   static extractText(html) {
-    return String(html || "")
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")  // remove scripts
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")    // remove styles
-      .replace(/<[^>]+>/g, " ")                     // strip all tags
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/\s{2,}/g, " ")                      // collapse whitespace
-      .trim();
+    // Use proper DOM parser instead of regex stripping
+    return DomParser.extractText(html, {
+      preserveTables: true,
+      preserveLists: true,
+    });
+  }
+
+  /**
+   * Extract structured content (for semantic analysis).
+   * @param {string} html
+   */
+  static extractStructured(html) {
+    return DomParser.extractStructured(html);
+  }
+
+  /**
+   * Extract main article content, excluding sidebars/footer.
+   * @param {string} html
+   */
+  static extractMainContent(html) {
+    return DomParser.extractMainContent(html);
   }
 
   /**
@@ -117,7 +131,7 @@ class WebAgent extends BaseAgent {
       minChars: Number.isFinite(opts.minChars) ? opts.minChars : 350,
     });
 
-    const excerpts = WebAgent._selectRelevantExcerpts(page.text, q, {
+    const excerpts = await WebAgent._selectRelevantExcerpts(page.text, q, {
       maxSnippets: 6,
       snippetChars: 520,
     });
@@ -150,7 +164,7 @@ class WebAgent extends BaseAgent {
   static async searchAndRag(query, opts = {}) {
     const q = String(query || "").trim();
     const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
-    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 5;
+    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 12;
     if (!q) {
       return { ok: false, status: 400, statusText: "Bad Request", url: "", text: "(no query provided)", rawSize: 0, textSize: 0, sources: [] };
     }
@@ -202,7 +216,7 @@ class WebAgent extends BaseAgent {
   static async _searchAndRagSingle(query, opts = {}) {
     const q = String(query || "").trim();
     const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
-    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 5;
+    const maxSites = Number.isFinite(opts.maxSites) ? opts.maxSites : 12;
     const concurrency = Number.isFinite(opts.concurrency) ? Math.max(1, Math.floor(opts.concurrency)) : 3;
 
     let urls = [];
@@ -236,7 +250,7 @@ class WebAgent extends BaseAgent {
     const pages = fetched.filter(Boolean);
     const sources = pages.map((p) => p.url);
 
-    const selected = WebAgent._selectTopRagChunks(pages, q, {
+    const selected = await WebAgent._selectTopRagChunks(pages, q, {
       maxChunks: 8,
       maxPerSource: 2,
       chunkSize: 900,
@@ -262,33 +276,27 @@ class WebAgent extends BaseAgent {
   }
 
   static _decomposeQuery(query) {
-    const s = String(query || "").toLowerCase();
-    const out = [];
-
-    // Django hints
-    const hasDjango = s.includes("django");
-    const ver = (s.match(/\b(\d+\.\d+)\b/) || [])[1] || "5.0";
-
-    const hasN1 = /(n\+1|n\s*\+\s*1)/.test(s) || s.includes("select_related") || s.includes("prefetch_related");
-    const hasInj = /(sql\s*injection|injection|rawsql|raw\s+sql|extra\()/i.test(s);
-    const hasConnector = /\bconnector\b|_connector/.test(s);
-
-    if (hasN1) {
-      out.push(`${hasDjango ? `Django ${ver} ` : ""}ORM N+1 problem select_related prefetch_related query optimization`);
-    }
-    if (hasInj || hasConnector) {
-      out.push(`${hasDjango ? `Django ${ver} ` : ""}ORM SQL injection prevention RawSQL extra() raw() params parameterized queries ${hasConnector ? "connector" : ""}`.trim());
-    }
-
-    // If we didn't detect anything, do a best-effort split on "and" for multi-part questions.
-    if (out.length === 0) {
-      const parts = String(query).split(/\s+\band\b\s+/i).map((p) => p.trim()).filter(Boolean);
-      if (parts.length > 1) {
-        for (const p of parts.slice(0, 3)) out.push(p);
+    // Use intelligent query reasoning instead of heuristic patterns
+    const analysis = QueryReasoner.analyze(query);
+    
+    // Start with the reasoning-based decomposition
+    let subqueries = analysis.subqueries;
+    
+    // Add context-specific searches for Django/web queries
+    if (analysis.entities.includes("django")) {
+      const version = (query.match(/\b(\d+\.\d+)\b/) || [])[1] || "5.0";
+      if (analysis.concepts.some(c => ["n+1", "optimization", "select_related", "prefetch"].includes(c))) {
+        subqueries.push(`Django ${version} ORM N+1 query optimization best practices`);
+      }
+      if (analysis.concepts.some(c => ["injection", "security", "sql"].includes(c))) {
+        subqueries.push(`Django ${version} SQL injection prevention parameterized queries`);
       }
     }
-
-    return out.length ? out : [query];
+    
+    // Ensure we don't duplicate queries
+    subqueries = Array.from(new Set(subqueries));
+    
+    return subqueries.length > 0 ? subqueries.slice(0, 4) : [query];
   }
 
   static async _mapLimit(items, limit, fn) {
@@ -368,7 +376,7 @@ class WebAgent extends BaseAgent {
           ...opts,
           maxChars: 14000,
         });
-        const excerpts = WebAgent._selectRelevantExcerpts(page.text, rq, {
+        const excerpts = await WebAgent._selectRelevantExcerpts(page.text, rq, {
           maxSnippets: 4,
           snippetChars: 520,
         });
@@ -472,57 +480,70 @@ class WebAgent extends BaseAgent {
     return null;
   }
 
-  static _selectRelevantExcerpts(text, query, cfg = {}) {
+  static async _selectRelevantExcerpts(text, query, cfg = {}) {
     const maxSnippets = Number.isFinite(cfg.maxSnippets) ? cfg.maxSnippets : 6;
     const snippetChars = Number.isFinite(cfg.snippetChars) ? cfg.snippetChars : 520;
     const t = String(text || "");
     const q = String(query || "");
-    const tokens = WebAgent._queryTokens(q);
-    if (!tokens.length || !t) return [];
+    
+    if (!q || !t) return [];
 
     const chunks = WebAgent._chunkText(t, 900, 140);
-    const scored = chunks
-      .map((c) => ({ c, score: WebAgent._scoreChunk(c, tokens) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, maxSnippets);
+    
+    // Use semantic + keyword hybrid scoring
+    const embeddingMgr = new EmbeddingManager();
+    const scored = await embeddingMgr.scoreChunks(q, chunks, {
+      keywordWeight: 0.3,
+      semanticWeight: 0.7,
+    });
 
     const out = [];
-    for (const { c } of scored) {
-      out.push(WebAgent._compactSnippet(c, snippetChars));
+    for (const { chunk } of scored.slice(0, maxSnippets)) {
+      out.push(WebAgent._compactSnippet(chunk, snippetChars));
     }
     return out;
   }
 
-  static _selectTopRagChunks(pages, query, cfg = {}) {
+  static async _selectTopRagChunks(pages, query, cfg = {}) {
     const maxChunks = Number.isFinite(cfg.maxChunks) ? cfg.maxChunks : 10;
     const maxPerSource = Number.isFinite(cfg.maxPerSource) ? cfg.maxPerSource : 3;
     const chunkSize = Number.isFinite(cfg.chunkSize) ? cfg.chunkSize : 900;
     const overlap = Number.isFinite(cfg.overlap) ? cfg.overlap : 140;
     const snippetChars = Number.isFinite(cfg.snippetChars) ? cfg.snippetChars : 520;
 
-    const tokens = WebAgent._queryTokens(query);
-    if (!tokens.length) return [];
+    if (!Array.isArray(pages)) return [];
+    if (!query) return [];
 
+    // Use semantic embeddings + source ranking
+    const embeddingMgr = new EmbeddingManager();
     const candidates = [];
-    for (const p of Array.isArray(pages) ? pages : []) {
+
+    for (const p of pages) {
       const src = p && p.url ? String(p.url) : "";
       const text = p && p.text ? String(p.text) : "";
       if (!src || !text) continue;
+
+      // Source credibility score (boosts official sources)
+      const sourceScore = SourceEvaluator.qualityScore(src, text, query);
+
       const chunks = WebAgent._chunkText(text, chunkSize, overlap);
-      for (const ch of chunks) {
-        const score = WebAgent._scoreChunk(ch, tokens);
-        if (score <= 0) continue;
+      const scored = await embeddingMgr.scoreChunks(query, chunks, {
+        keywordWeight: 0.3,
+        semanticWeight: 0.7,
+      });
+
+      for (const item of scored) {
         candidates.push({
           source: src,
-          score,
-          text: WebAgent._compactSnippet(ch, snippetChars),
+          score: (item.score * 0.7) + (sourceScore * 0.3), // Combine chunk + source scores
+          text: WebAgent._compactSnippet(item.chunk, snippetChars),
         });
       }
     }
 
     candidates.sort((a, b) => b.score - a.score);
 
+    // Limit per source (for diversity)
     const per = new Map();
     const out = [];
     for (const c of candidates) {

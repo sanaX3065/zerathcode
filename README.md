@@ -1,27 +1,56 @@
-# ZerathCode v1.0
+# ZerathCode v2.0
 ### Multi-Agent AI Dev System for Termux / Android
-**Author: sanaX3065**
+**Author: sanaX3065 | Enhanced RAG Pipeline: March 2026**
+
+---
+
+## 🎯 **What's New in v2.0: RAG Pipeline Overhaul**
+
+ZerathCode v2.0 includes a **comprehensive RAG (Retrieval-Augmented Generation) engine upgrade**:
+
+✅ **Semantic retrieval** (vs keyword-only)  
+✅ **Intelligent query decomposition** (vs heuristics)  
+✅ **Source credibility ranking** (vs treating all equal)  
+✅ **Grounding enforcement** (no hallucinations)  
+✅ **Confidence scoring** (knows when data insufficient)  
+✅ **Proper HTML structure** (vs regex stripping)  
+✅ **Intermediate reasoning layer** (vs direct retrieval→answer)  
+✅ **12 sources** instead of 5 (better diversity)  
+
+**[→ See DELIVERABLES.md for complete list]**
 
 ---
 
 ## Table of Contents
 
 1. [What is ZerathCode?](#what-is-zerathcode)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Full File Map — What Every File Does](#full-file-map)
-5. [How the CLI Works](#how-the-cli-works)
-6. [How the REPL Works](#how-the-repl-works)
-7. [How the Orchestrator Works](#how-the-orchestrator-works)
-8. [How Agents Work](#how-agents-work)
-9. [How to Wire a New Agent](#how-to-wire-a-new-agent)
-10. [API Key Management](#api-key-management)
-11. [Memory System](#memory-system)
-12. [Self-Healing Agent](#self-healing-agent)
-13. [System Monitor](#system-monitor)
-14. [Environment Variables](#environment-variables)
-15. [Troubleshooting](#troubleshooting)
-16. [Architecture Diagram](#architecture-diagram)
+2. [What's New in v2.0](#whats-new-in-v20-rag-pipeline-overhaul)
+3. [Installation](#installation)
+4. [Quick Start](#quick-start)
+5. [Documentation](#documentation)
+6. [Full File Map — What Every File Does](#full-file-map)
+7. [How the CLI Works](#how-the-cli-works)
+8. [How the REPL Works](#how-the-repl-works)
+9. [How the Orchestrator Works](#how-the-orchestrator-works)
+10. [How Agents Work](#how-agents-work)
+11. [How to Wire a New Agent](#how-to-wire-a-new-agent)
+12. [API Key Management](#api-key-management)
+13. [Memory System](#memory-system)
+14. [Self-Healing Agent](#self-healing-agent)
+15. [System Monitor](#system-monitor)
+16. [Environment Variables](#environment-variables)
+17. [Troubleshooting](#troubleshooting)
+18. [Architecture Diagram](#architecture-diagram)
+
+---
+
+## Documentation (v2.0)
+
+📄 **[DELIVERABLES.md](./DELIVERABLES.md)** — Complete v2.0 overhaul summary  
+📄 **[PIPELINE_IMPROVEMENTS.md](./PIPELINE_IMPROVEMENTS.md)** — Detailed architecture improvements  
+📄 **[FIX_SUMMARY.md](./FIX_SUMMARY.md)** — What was fixed and why  
+📄 **[INSTALL_UPGRADE.md](./INSTALL_UPGRADE.md)** — Installation & upgrade guide  
+📄 **[QUICK_REFERENCE.md](./QUICK_REFERENCE.md)** — v1.x to v2.0 comparison  
 
 ---
 
@@ -33,7 +62,7 @@ It supports three AI providers (Claude, Gemini, GPT) and four modes:
 
 | Mode | What it does |
 |---|---|
-| 💬 Chat | Ask coding questions, get code snippets |
+| 💬 Chat | Ask coding questions, get code snippets (now with grounded answers!) |
 | 🌐 Full Stack | Build complete Node.js + HTML/CSS/JS web apps |
 | 📱 Mobile Dev | Build Android APKs with Kotlin + Gradle |
 | 🚀 Infrastructure | Deploy apps with PM2 + Cloudflare tunnel |
