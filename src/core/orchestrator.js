@@ -35,6 +35,7 @@ const InfrastructureAgent = require("../agents/infrastructureAgent");
 const SecurityAgent       = require("../agents/securityAgent");
 const QAAgent             = require("../agents/qaAgent");
 const AssistantAgent      = require("../agents/assistantAgent");
+const WebAgent            = require("../agents/webAgent");
 
 const PREVIEW_LINES = 25;
 
@@ -52,6 +53,7 @@ You have access to a web_fetch tool that lets you retrieve live data from the in
 TOOL USE RULES:
 - For questions about real-time data (stock prices, live news, current events, weather, crypto prices, sports scores) — ALWAYS use web_fetch FIRST to get current information before answering.
 - For questions about recent events you may not know (past 1-2 years) — use web_fetch to verify.
+- For questions that mention a specific software version (e.g., "Django 5.0", "React 19", "Node 22") and ask about behavior, security, or changes — use web_fetch to verify official docs before answering.
 - For stable facts (code concepts, math, history, general knowledge) — answer directly without web_fetch.
 - After receiving web_fetch results, synthesise them into a clear, direct answer. NEVER say "I cannot access real-time data" — you CAN via web_fetch.
 
@@ -375,6 +377,7 @@ class Orchestrator {
     let assistantSummary = "";
     let loopCount       = 0;
     let gotFinalAnswer  = false;
+    let forcedWebOnce   = false;
 
     while (loopCount < MAX_AGENT_LOOPS && !gotFinalAnswer) {
       loopCount++;
@@ -410,11 +413,44 @@ class Orchestrator {
         return;
       }
 
+      // ── Chat fallback: model answered directly but should have used web_fetch ──
+      // Keep this flow logic in the orchestrator, but delegate all "web agent"
+      // decisions + fetching to WebAgent.
+      if (
+        isChatMode &&
+        !forcedWebOnce &&
+        toolResults.length === 0 &&
+        WebAgent.shouldAutoFetch(userInput)
+      ) {
+        const hasWebFetch = steps.some((s) => s && s.action === "web_fetch");
+        const hasMessage  = steps.some((s) => s && (s.action === "message" || s.action === "ask_user"));
+
+        if (hasMessage && !hasWebFetch) {
+          forcedWebOnce = true;
+          const urls = WebAgent.autoFetchUrls(userInput);
+          for (const url of urls) {
+            const text = await this._executeStep({ action: "web_fetch", params: { url } });
+            if (text) {
+              toolResults.push({ url, content: String(text).slice(0, 3000) });
+              renderer.agentLog("web", "ok",
+                `Result captured (${String(text).length} chars) — feeding back to ${this.provider}`);
+            }
+          }
+          // Now that we have results, re-loop so the model answers based on [WEB RESULTS].
+          continue;
+        }
+      }
+
       // Execute each step — collect tool results for next loop
       let thisLoopHasToolCalls = false;
+      const loopHasWebFetch = steps.some((s) => s && s.action === "web_fetch");
+      const suppressMessages = isChatMode && loopHasWebFetch;
+      let suppressedText = "";
+      let hadSuppressedMessage = false;
 
       for (const step of steps) {
-        const result = await this._executeStep(step);
+        const silent = suppressMessages && step.action === "message";
+        const result = await this._executeStep(step, { silent });
 
         if (step.action === "web_fetch" && result) {
           toolResults.push({
@@ -426,10 +462,22 @@ class Orchestrator {
             `Result captured (${String(result).length} chars) — feeding back to ${this.provider}`);
         }
 
-        if (step.action === "message" || step.action === "ask_user") {
+        if ((step.action === "message" && !silent) || step.action === "ask_user") {
           assistantSummary += (result || "") + "\n";
           gotFinalAnswer = true;   // model gave a real answer — stop looping
         }
+
+        if (step.action === "message" && silent) {
+          hadSuppressedMessage = true;
+          suppressedText += (result || "") + "\n";
+        }
+      }
+
+      // If web_fetch failed (no captured results), don't drop the answer entirely.
+      if (!thisLoopHasToolCalls && !gotFinalAnswer && hadSuppressedMessage && suppressedText.trim()) {
+        renderer.aiMessage(suppressedText.trim(), this.provider);
+        assistantSummary += suppressedText.trim() + "\n";
+        gotFinalAnswer = true;
       }
 
       // If this loop only made tool calls and no message yet — continue looping
@@ -458,14 +506,14 @@ class Orchestrator {
   }
 
   // ── Execute one step ───────────────────────────────────────────────────────
-  async _executeStep(step) {
+  async _executeStep(step, opts = {}) {
     const { action, params = {} } = step;
 
     switch (action) {
 
       // ── message ──────────────────────────────────────────────────────────
       case "message": {
-        renderer.aiMessage(params.text || "", this.provider);
+        if (!opts.silent) renderer.aiMessage(params.text || "", this.provider);
         return params.text;
       }
 
@@ -668,15 +716,13 @@ class Orchestrator {
         renderer.agentLog("web", "info", `Fetching ${params.url}`);
         this.memory.logAction("web", "fetch", params.url);
         try {
-          const res  = await fetch(params.url, {
-            headers: { "User-Agent": "ZerathCode/1.0" },
-            signal:  AbortSignal.timeout(15000),
+          const out = await WebAgent.fetchText(params.url, {
+            timeoutMs: 15000,
+            maxChars:  3000,
+            userAgent: "ZerathCode/1.0",
           });
-          const text = (await res.text())
-            .replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").trim()
-            .slice(0, 3000);
-          renderer.agentLog("web", "ok", `${res.status} — ${text.length} chars`);
-          return text;
+          renderer.agentLog("web", "ok", `${out.status} — ${out.text.length} chars`);
+          return out.text;
         } catch (err) {
           renderer.agentLog("web", "error", err.message);
           return null;
