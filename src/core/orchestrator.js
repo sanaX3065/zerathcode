@@ -71,7 +71,7 @@ Code with file:
 AVAILABLE ACTIONS: message, create_file, read_file, web_fetch`,
 
   // ── FULL STACK ────────────────────────────────────────────────────────────
-  fullstack: `You are ZerathCode Full Stack Agent — an autonomous web application builder for Termux/Android.
+  fullstack: `You are ZerathCode Full Stack Agent — an autonomous web application builder for Termux/Android (ARM64, Node.js v22+).
 
 YOUR ONLY JOB: Build complete, immediately runnable web applications.
 
@@ -79,29 +79,36 @@ ABSOLUTE RULES:
 1. Respond with ONLY a valid JSON array — no text before or after it.
 2. EVERY response MUST start with a "plan" action listing ALL files you will create.
 3. Create EVERY file with 100% complete code — no placeholders, no TODOs.
-4. Tech stack rules (Termux has no complex build tools):
-   - Frontend: vanilla HTML5 + CSS3 + vanilla JavaScript ONLY
-   - Backend:  Node.js with built-in http module OR express
-   - React: ONLY via CDN <script> tags in HTML. Never via npm install.
-   - Start command: ALWAYS "node server.js" — never parcel, vite, or webpack
-5. DATABASE CRITICAL RULE — READ THIS:
-   - NEVER use sqlite3 npm package — it requires native compilation (node-gyp) which ALWAYS fails on Termux ARM because Android NDK is not available.
-   - NEVER use better-sqlite3 — SAME PROBLEM. It also uses node-gyp and ALSO fails on Termux ARM.
-   - FOR SQLITE: ALWAYS use "sql.js" package (npm install sql.js). It is pure JavaScript/WASM with zero native compilation.
-   - sql.js example:
-     const initSqlJs = require('sql.js');
-     let db;
-     initSqlJs().then(SQL => {
-       db = new SQL.Database();
-       db.run('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)');
-     });
-     // Query: const result = db.exec('SELECT * FROM users'); const rows = result[0]?.values || [];
-     // Insert: db.run('INSERT INTO users VALUES (?,?)', [null, name]);
-6. Last steps MUST be: npm install then node server.js
-7. Add .gitignore that excludes node_modules
-8. End with a memory_note describing what was built
-9. All paths are relative to the project directory
-10. Write SYNTACTICALLY VALID JavaScript — check every bracket, parenthesis, and brace is closed. Template literals must use backticks. No mixed quote styles inside the same string.
+4. Tech stack rules (Termux has NO complex build tools):
+   - Frontend: vanilla HTML5 + CSS3 + vanilla JavaScript ONLY in public/ directory
+   - Backend:  Node.js with express (serve public/ as static folder)
+   - React/Vue: ONLY via CDN <script> tags in HTML — NEVER via npm install
+   - Start command: ALWAYS "node server.js" — NEVER vite, parcel, or webpack
+5. PACKAGE.JSON RULES — CRITICAL:
+   - "version" field MUST be a plain semver string: "1.0.0" — NEVER use "^1.0.0" or "~1.0.0" in the version field
+   - dependency versions CAN use ^ prefix: "express": "^4.18.2" is correct
+   - "scripts.start" must be: "node server.js" — nothing else
+6. DATABASE RULES — CRITICAL:
+   - NEVER use "sqlite3" package — requires Android NDK, ALWAYS fails on Termux ARM
+   - NEVER use "better-sqlite3" — SAME PROBLEM, also fails. Do not use it.
+   - FOR SQLITE: ONLY use "sql.js" package. It is pure JavaScript/WASM, zero native compilation.
+   - sql.js pattern:
+       const initSqlJs = require('sql.js');
+       let db;
+       async function initDb() {
+         const SQL = await initSqlJs();
+         db = new SQL.Database();
+         db.run('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)');
+       }
+       initDb();
+       // Insert: db.run('INSERT INTO users VALUES (NULL, ?)', ['alice']);
+       // Query:  const res = db.exec('SELECT * FROM users');
+       //         const rows = res[0] ? res[0].values.map(r => Object.fromEntries(res[0].columns.map((c,i)=>[c,r[i]]))) : [];
+7. Write syntactically valid JavaScript — every { must have }, every ( must have ), all template literals use backticks.
+8. Last steps MUST be: npm install, then node server.js (background: true)
+9. Add .gitignore that excludes node_modules and .env
+10. End with a memory_note describing what was built
+11. All paths are relative to the project directory
 
 REQUIRED STRUCTURE (copy this pattern every time):
 [
@@ -395,6 +402,11 @@ class Orchestrator {
       try { this.memory.writeReadme(); } catch {}
     }
 
+    // Always ensure run.sh exists in fullstack/mobiledev/infra modes
+    if (this.mode === "fullstack" || this.mode === "mobiledev" || this.mode === "infra") {
+      this._ensureRunScript();
+    }
+
     // Auto-start dev server in fullstack mode if files were created this turn
     if (this.mode === "fullstack" && this._filesCreated > 0) {
       await this._ensureDevServer();
@@ -447,48 +459,68 @@ class Orchestrator {
         }
 
         let content = params.content || "";
+        const ext   = path.extname(fp).slice(1).toLowerCase();
 
-        // ── Proactive: rewrite sqlite3/better-sqlite3 → sql.js before writing ──
-        // Both require native compilation and cannot work on Termux ARM.
+        // ── Proactive: intercept sqlite3/better-sqlite3 before it hits disk ───
         if (/require\(['"](?:sqlite3|better-sqlite3)['"]\)/.test(content)) {
           renderer.agentLog("file", "warn",
-            `${rel}  ${C.yellow}sqlite3/better-sqlite3 detected — auto-rewriting to sql.js${C.reset}`);
+            `${rel}  ${C.yellow}⚠ sqlite3/better-sqlite3 intercepted — auto-replacing with sql.js${C.reset}`);
           content = content
-            .replace(/const\s+(\w+)\s*=\s*require\(['"](?:sqlite3|better-sqlite3)['"]\)(?:\.verbose\(\))?;?/g,
-              "const initSqlJs = require('sql.js');")
-            .replace(/new\s+(?:\w+\.)?Database\([^)]*\)(?:,\s*(?:function\s*)?\([^)]*\)\s*\{[^}]*\})?;?/g,
-              "// sql.js: init via: const SQL = await initSqlJs(); const db = new SQL.Database();");
+            .replace(
+              /const\s+(\w+)\s*=\s*require\(['"](?:sqlite3|better-sqlite3)['"]\)(?:\.verbose\(\))?;?/g,
+              "const initSqlJs = require('sql.js');"
+            )
+            .replace(
+              /new\s+(?:\w+\.)?Database\([^)]*\)/g,
+              "/* sql.js: await initSqlJs() then new SQL.Database() */"
+            );
         }
 
-        // ── JS syntax pre-validation (catches AI-generated malformed code) ────
-        const ext_ = path.extname(fp).slice(1).toLowerCase();
-        if ((ext_ === "js" || ext_ === "ts") && content.length > 0) {
+        // ── Proactive: fix package.json version field if AI wrote "^1.0.0" ───
+        if (ext === "json" && (rel === "package.json" || fp.endsWith("package.json"))) {
           try {
-            // Use Node's built-in require/parse check via vm module
+            const pkg = JSON.parse(content);
+            // "version" must be plain semver — no range prefixes
+            if (pkg.version && /^[^0-9]/.test(pkg.version)) {
+              const fixed = pkg.version.replace(/^[^0-9]*/, "") || "1.0.0";
+              renderer.agentLog("file", "warn",
+                `${rel}  ${C.yellow}⚠ version "${pkg.version}" → "${fixed}" (was not valid semver)${C.reset}`);
+              pkg.version = fixed;
+              content = JSON.stringify(pkg, null, 2);
+            }
+            // Ensure "scripts.start" doesn't invoke vite/webpack/parcel
+            if (pkg.scripts?.start && /vite|webpack|parcel/.test(pkg.scripts.start)) {
+              renderer.agentLog("file", "warn",
+                `${rel}  ${C.yellow}⚠ "npm start" invokes bundler — replacing with "node server.js"${C.reset}`);
+              pkg.scripts.start = "node server.js";
+              content = JSON.stringify(pkg, null, 2);
+            }
+          } catch {} // invalid JSON handled below
+        }
+
+        // ── JS syntax validation ──────────────────────────────────────────────
+        if ((ext === "js" || ext === "mjs" || ext === "cjs") && content.length > 10) {
+          try {
             const vm = require("vm");
             new vm.Script(content, { filename: rel });
           } catch (syntaxErr) {
             renderer.agentLog("file", "warn",
-              `${rel}  ${C.yellow}SYNTAX ERROR in AI-generated code: ${syntaxErr.message.slice(0, 80)}${C.reset}`);
-            renderer.agentLog("file", "warn",
-              `${rel}  ${C.grey}File written but may need manual fix. Check line numbers above.${C.reset}`);
-            // Still write it so the user can see and fix it, but log prominently
-            this.memory.logError(rel, `AI generated syntax error: ${syntaxErr.message}`);
+              `${rel}  ${C.yellow}⚠ SYNTAX ERROR: ${syntaxErr.message.slice(0, 100)}${C.reset}`);
+            this.memory.logError(rel, `Syntax error in AI-generated JS: ${syntaxErr.message}`);
+            // Still write — user can see and fix, healer will catch on run
           }
         }
 
         // ── JSON validation ───────────────────────────────────────────────────
-        if (ext_ === "json" && content.length > 0) {
+        if (ext === "json" && content.length > 0) {
           try { JSON.parse(content); } catch (jsonErr) {
             renderer.agentLog("file", "warn",
-              `${rel}  ${C.yellow}INVALID JSON: ${jsonErr.message.slice(0, 80)}${C.reset}`);
-            this.memory.logError(rel, `AI generated invalid JSON: ${jsonErr.message}`);
+              `${rel}  ${C.yellow}⚠ INVALID JSON: ${jsonErr.message.slice(0, 80)}${C.reset}`);
+            this.memory.logError(rel, `Invalid JSON in AI-generated file: ${jsonErr.message}`);
           }
         }
 
         fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
-
-        const ext  = path.extname(fp).slice(1).toLowerCase();
         const lang = {
           js: "JavaScript", ts: "TypeScript", kt: "Kotlin", java: "Java",
           py: "Python", html: "HTML", css: "CSS", json: "JSON",
@@ -765,9 +797,8 @@ class Orchestrator {
     }
   }
 
-  // ── Auto dev server for fullstack mode ─────────────────────────────────────
+  // ── Auto dev server — with crash detection and self-healing ─────────────
   async _ensureDevServer() {
-    // If already running, skip
     if (this._devServer) {
       renderer.agentLog("infra", "info",
         `Dev server already running on :${this._devPort}`);
@@ -778,22 +809,35 @@ class Orchestrator {
     const candidates = ["server.js", "index.js", "app.js"]
       .map(f => path.join(this.workDir, f));
     const main = candidates.find(f => fs.existsSync(f));
-    if (!main) return;
+    if (!main) {
+      renderer.agentLog("infra", "warn", "No server entry point found (server.js / index.js / app.js)");
+      return;
+    }
 
-    // Decide start command
+    // Decide start command — prefer "node server.js" over npm start for reliability
     const pkgFile = path.join(this.workDir, "package.json");
     let cmd  = "node";
     let args = [path.basename(main)];
 
+    // Only use npm start if the script is explicitly "node server.js" or similar
+    // Avoids npm start triggering vite/parcel/webpack which fail on Termux
     if (fs.existsSync(pkgFile)) {
       try {
         const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8"));
-        if (pkg.scripts?.start) { cmd = "npm"; args = ["start"]; }
+        const startScript = pkg.scripts?.start || "";
+        // Only use npm start if it's a plain node invocation, not a bundler
+        if (startScript && /^node\s+/.test(startScript.trim())) {
+          cmd = "npm"; args = ["start"];
+        }
       } catch {}
     }
 
     renderer.agentLog("infra", "run",
       `Starting dev server: ${cmd} ${args.join(" ")}  ${C.grey}(port ${this._devPort})${C.reset}`);
+
+    let startupOutput = "";
+    let crashed       = false;
+    let exitCode      = null;
 
     this._devServer = spawn(cmd, args, {
       cwd:   this.workDir,
@@ -803,27 +847,139 @@ class Orchestrator {
 
     let linesShown = 0;
     const onOut = (chunk) => {
-      if (linesShown >= 6) return;
-      chunk.toString().split("\n").filter(Boolean).forEach((l) => {
-        if (linesShown++ < 6) renderer.agentLog("infra", "ok", l.trim().slice(0, 80));
+      const text = chunk.toString();
+      startupOutput += text;
+      if (linesShown >= 8) return;
+      text.split("\n").filter(Boolean).forEach((l) => {
+        if (linesShown++ < 8) renderer.agentLog("infra", "ok", l.trim().slice(0, 100));
       });
     };
     this._devServer.stdout.on("data", onOut);
     this._devServer.stderr.on("data", onOut);
 
     this._devServer.on("close", (code) => {
-      renderer.agentLog("infra", code === 0 ? "ok" : "warn",
-        `Dev server exited (code ${code})`);
+      crashed  = code !== 0;
+      exitCode = code;
+      if (code !== 0) {
+        renderer.agentLog("infra", "error",
+          `Dev server CRASHED (exit code ${code}) — sending to self-healer`);
+      } else {
+        renderer.agentLog("infra", "ok", `Dev server stopped cleanly (code 0)`);
+      }
       this._devServer = null;
     });
 
-    // Let it breathe for 1.5s before showing the URL
-    await new Promise(r => setTimeout(r, 1500));
+    // Wait up to 4s to see if it survives startup
+    await new Promise(r => setTimeout(r, 4000));
 
+    if (crashed || this._devServer === null) {
+      // Server died during startup — print actual crash output clearly
+      const crashLines = startupOutput.split("\n").filter(Boolean);
+      console.log(`\n  ${C.bred}✖  Dev server failed to start (exit ${exitCode ?? "?"}):${C.reset}`);
+      crashLines.slice(-15).forEach(l =>
+        console.log(`  ${C.grey}${l.trim().slice(0, 100)}${C.reset}`)
+      );
+      console.log("");
+
+      // Auto-heal: send crash output to self-healer
+      renderer.agentLog("infra", "warn",
+        "Dev server crash detected — attempting auto-heal…");
+
+      const healResult = await this.healer.run(
+        cmd, args, this.workDir, 60000
+      );
+
+      if (healResult.success) {
+        renderer.agentLog("infra", "ok",
+          "Self-healer fixed the server — restarting dev server…");
+        // Reset and retry once
+        this._devServer = null;
+        await this._ensureDevServer();
+      } else {
+        renderer.agentLog("infra", "error",
+          "Auto-heal could not fix the server. Check errors above and fix manually.");
+        this.memory.logError("devServer", startupOutput.slice(0, 600));
+        // Log crash to memory so next AI turn has context
+        this.memory.addNote(`Dev server crashed on startup: ${crashLines.slice(-3).join(" | ")}`);
+      }
+      return;
+    }
+
+    // Server survived — it's running
     console.log(
-      `\n  ${C.bgreen}▶${C.reset}  App running at ` +
+      `\n  ${C.bgreen}▶${C.reset}  Server running at ` +
       `${C.bcyan}http://localhost:${this._devPort}${C.reset}\n`
     );
+  }
+
+  // ── Ensure run.sh exists for every project turn ───────────────────────────
+  // Creates/updates run.sh with the correct start command.
+  // If a Vite frontend is in /src, run.sh runs backend + frontend together.
+  _ensureRunScript() {
+    const runScript = path.join(this.workDir, "run.sh");
+
+    // Detect what the project has
+    const hasServer    = ["server.js", "index.js", "app.js"].some(f => fs.existsSync(path.join(this.workDir, f)));
+    const hasPublic    = fs.existsSync(path.join(this.workDir, "public"));
+    const hasSrcVite   = fs.existsSync(path.join(this.workDir, "src")) && fs.existsSync(path.join(this.workDir, "vite.config.js"));
+    const hasPkg       = fs.existsSync(path.join(this.workDir, "package.json"));
+
+    let backendCmd = "node server.js";
+    if (hasPkg) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(this.workDir, "package.json"), "utf8"));
+        const startScript = pkg.scripts?.start || "";
+        if (startScript && /^node\s+/.test(startScript.trim())) {
+          backendCmd = `npm start`;
+        }
+        const mainEntry = pkg.main || "";
+        if (mainEntry && fs.existsSync(path.join(this.workDir, mainEntry))) {
+          backendCmd = `node ${mainEntry}`;
+        }
+      } catch {}
+    }
+
+    let scriptContent;
+
+    if (hasSrcVite) {
+      // Full-stack with Vite frontend — warn user Vite won't work on Termux
+      scriptContent = `#!/bin/bash
+# ZerathCode — Project Run Script
+# NOTE: Vite frontend detected. On Termux, run backend only (no build step needed for API).
+# For frontend, open public/index.html directly in a browser, or use plain HTML.
+
+set -e
+cd "$(dirname "$0")"
+
+echo "Starting backend server..."
+PORT=\${PORT:-3000} ${backendCmd}
+`;
+    } else {
+      scriptContent = `#!/bin/bash
+# ZerathCode — Project Run Script
+# Run this to start the project: bash run.sh
+
+set -e
+cd "$(dirname "$0")"
+
+# Install dependencies if node_modules is missing
+if [ ! -d "node_modules" ]; then
+  echo "Installing dependencies..."
+  npm install
+fi
+
+echo "Starting server on port \${PORT:-3000}..."
+PORT=\${PORT:-3000} ${backendCmd}
+`;
+    }
+
+    try {
+      fs.writeFileSync(runScript, scriptContent, { encoding: "utf8", mode: 0o755 });
+      renderer.agentLog("file", "create",
+        `run.sh  ${C.grey}(${backendCmd})${C.reset}`);
+    } catch (err) {
+      renderer.agentLog("file", "warn", `Could not write run.sh: ${err.message}`);
+    }
   }
 
   // ── Build system prompt ────────────────────────────────────────────────────
