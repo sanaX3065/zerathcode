@@ -1,7 +1,7 @@
 {
   "name": "zerathcode",
-  "version": "1.0.0",
-  "description": "ZerathCode — Multi-Agent AI Dev System for Termux",
+  "version": "2.0.0",
+  "description": "ZerathCode — Multi-Agent AI Dev System for Termux + Mobile Bridge",
   "author": "sanaX3065",
   "license": "MIT",
   "main": "bin/zerathcode.js",
@@ -12,14 +12,16 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["cli", "agent", "termux", "android", "ai", "repl", "coding-agent", "autonomous"],
+  "keywords": ["cli", "agent", "termux", "android", "ai", "repl", "bridge", "websocket"],
   "scripts": {
     "start": "node bin/zerathcode.js run",
+    "bridge": "node bin/zerathcode.js bridge",
     "link": "npm link"
   },
   "dependencies": {
     "@xenova/transformers": "^2.13.5",
     "htmlparser2": "^9.1.0",
-    "natural": "^6.10.0"
+    "natural": "^6.10.0",
+    "ws": "^8.17.0"
   }
 }

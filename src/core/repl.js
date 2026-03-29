@@ -61,11 +61,10 @@ const MODES = [
     colour: C.bblue,
   },
   {
-    id:         "fullai",
-    label:      "🤖  Full AI Mode",
-    desc:       "Fully autonomous AI agent — coming in next release",
-    colour:     C.grey,
-    comingSoon: true,
+    id:     "fullai",
+    label:  "🤖  Full AI Mode",
+    desc:   "Direct AI control of your mobile device via WebSocket bridge",
+    colour: C.bgreen,
   },
 ];
 
@@ -172,14 +171,28 @@ class Repl {
     }
 
     // Step 6: Build orchestrator
-    this.orchestrator = new Orchestrator({
-      provider:    this.provider,
-      mode:        this.mode,
-      keyManager:  this.keyManager,
-      memory:      this.memory,
-      permManager: this.permManager,
-      workDir,
-    });
+    if (this.mode === "fullai") {
+      const FullAiOrchestrator = require("./fullAiOrchestrator");
+      const { getDeviceBridge } = require("./deviceBridge");
+      
+      // Start bridge server when entering fullai mode
+      getDeviceBridge().start();
+      
+      this.orchestrator = new FullAiOrchestrator({
+        provider:   this.provider,
+        keyManager: this.keyManager,
+        memory:     this.memory,
+      });
+    } else {
+      this.orchestrator = new Orchestrator({
+        provider:    this.provider,
+        mode:        this.mode,
+        keyManager:  this.keyManager,
+        memory:      this.memory,
+        permManager: this.permManager,
+        workDir,
+      });
+    }
 
     // Step 7: Show badge + enter REPL
     renderer.divider();
@@ -564,6 +577,10 @@ class Repl {
       console.log(`${C.grey}  Session ended — ephemeral memory cleared.${C.reset}`);
     }
     if (this.orchestrator) this.orchestrator.shutdown();
+    if (this.mode === "fullai") {
+      const { getDeviceBridge } = require("./deviceBridge");
+      getDeviceBridge().stop();
+    }
     this.monitor.stop();
     console.log(`\n${C.bmagenta}  Goodbye from ZerathCode.${C.reset}\n`);
     if (this.rl) this.rl.close();
