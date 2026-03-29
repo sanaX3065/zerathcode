@@ -47,28 +47,327 @@ class WebAgent extends BaseAgent {
   static async fetchText(url, opts = {}) {
     const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 15000;
     const maxChars  = Number.isFinite(opts.maxChars)  ? opts.maxChars  : 3000;
+    const minChars  = Number.isFinite(opts.minChars)  ? opts.minChars  : 350;
     const userAgent = opts.userAgent || "ZerathCode/1.0";
 
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": userAgent,
-        "Accept": "text/html,text/plain,application/json",
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const fetchOnce = async (u) => {
+      const res = await fetch(u, {
+        headers: {
+          "User-Agent": userAgent,
+          "Accept": "text/html,text/plain,application/json",
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const raw = await res.text();
+      const text = WebAgent.extractText(raw).slice(0, maxChars);
+      return { res, raw, text };
+    };
 
-    const raw = await res.text();
-    const text = WebAgent.extractText(raw).slice(0, maxChars);
+    let u = url;
+    let { res, raw, text } = await fetchOnce(u);
+
+    // Fallback: some pages (notably Google SERPs) are mostly JS, so extracted text is tiny.
+    // Use r.jina.ai "readable proxy" to get server-rendered/plain content.
+    if (text.length < minChars && !String(u).startsWith("https://r.jina.ai/")) {
+      const jinaUrl = WebAgent._jinaUrl(u);
+      try {
+        const out = await fetchOnce(jinaUrl);
+        // If the proxy is better, keep it (still report original status if proxy returns 200 OK).
+        if (out.text.length > text.length) {
+          res = out.res;
+          raw = out.raw;
+          text = out.text;
+          u = jinaUrl;
+        }
+      } catch {
+        // Ignore fallback failures, keep original.
+      }
+    }
 
     return {
       ok:         !!res.ok,
       status:     res.status,
       statusText: res.statusText || "",
-      url:        res.url || url,
+      url:        res.url || u,
       text,
       rawSize:    raw.length,
       textSize:   text.length,
     };
+  }
+
+  // ── RAG-like extraction for better "web_fetch" usefulness ────────────────
+  // Goal: return only the most relevant parts of a page (or multiple pages)
+  // so the LLM sees signal, not noise.
+  static async fetchRelevant(url, query = "", opts = {}) {
+    const q = String(query || "").trim();
+
+    // If user asked to fetch a search URL, treat it as "search then scrape sources".
+    if (WebAgent._isSearchUrl(url)) {
+      const sq = WebAgent._extractSearchQuery(url) || q;
+      return WebAgent._searchThenRag(sq, q || sq, opts);
+    }
+
+    if (!q) return WebAgent.fetchText(url, opts);
+
+    // Direct page: fetch more content, then select top excerpts.
+    const page = await WebAgent.fetchText(url, {
+      ...opts,
+      // Fetch more than the final output so the retriever has room to work.
+      maxChars: Math.max(Number(opts.maxChars || 0) || 0, 12000),
+      minChars: Number.isFinite(opts.minChars) ? opts.minChars : 350,
+    });
+
+    const excerpts = WebAgent._selectRelevantExcerpts(page.text, q, {
+      maxSnippets: 6,
+      snippetChars: 520,
+    });
+
+    const header = `Source: ${url}\nQuery: ${q}\n`;
+    const body = excerpts.length
+      ? excerpts.map((s, i) => `(${i + 1}) ${s}`).join("\n\n")
+      : page.text.slice(0, Number(opts.maxChars) || 3000);
+
+    const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
+    return {
+      ok: page.ok,
+      status: page.status,
+      statusText: page.statusText,
+      url: page.url,
+      text: (header + "\n" + body).slice(0, maxOut),
+      rawSize: page.rawSize,
+      textSize: Math.min((header + "\n" + body).length, maxOut),
+      sources: [url],
+    };
+  }
+
+  static _jinaUrl(url) {
+    const u = String(url || "");
+    if (u.startsWith("https://r.jina.ai/")) return u;
+    // r.jina.ai expects the full scheme in the path: https://r.jina.ai/https://example.com
+    return `https://r.jina.ai/${u}`;
+  }
+
+  static _isSearchUrl(url) {
+    try {
+      const u = new URL(String(url));
+      const host = u.hostname.toLowerCase();
+      if (host.includes("google.") && u.pathname === "/search") return true;
+      if (host === "html.duckduckgo.com" && u.pathname.startsWith("/html/")) return true;
+      if (host === "duckduckgo.com" && u.pathname === "/html/") return true;
+      if (host.includes("bing.com") && u.pathname === "/search") return true;
+    } catch {}
+    return false;
+  }
+
+  static _extractSearchQuery(url) {
+    try {
+      const u = new URL(String(url));
+      return u.searchParams.get("q") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  static async _searchThenRag(searchQuery, ragQuery, opts = {}) {
+    const sq = String(searchQuery || "").trim();
+    const rq = String(ragQuery || "").trim() || sq;
+    const maxOut = Number.isFinite(opts.maxChars) ? opts.maxChars : 3000;
+
+    // Prefer high-signal, authoritative sources when we can infer them.
+    const inferred = WebAgent._inferAuthoritativeUrls(rq);
+    let urls = inferred;
+
+    // If we couldn't infer anything, do a lightweight HTML search (DuckDuckGo).
+    if (urls.length === 0 && sq) {
+      try {
+        const found = await WebAgent._duckDuckGoHtmlUrls(sq, opts);
+        urls = found;
+      } catch {
+        urls = [];
+      }
+    }
+
+    if (urls.length === 0) {
+      // Last resort: just fetch the original URL.
+      return WebAgent.fetchText(WebAgent.googleSearchUrl(sq || rq), opts);
+    }
+
+    const all = [];
+    const sources = [];
+    for (const u of urls.slice(0, 2)) {
+      try {
+        const page = await WebAgent.fetchText(u, {
+          ...opts,
+          maxChars: 14000,
+        });
+        const excerpts = WebAgent._selectRelevantExcerpts(page.text, rq, {
+          maxSnippets: 4,
+          snippetChars: 520,
+        });
+        if (excerpts.length) {
+          all.push(`Source: ${u}\n` + excerpts.map((s, i) => `(${i + 1}) ${s}`).join("\n\n"));
+          sources.push(u);
+        }
+      } catch {
+        // ignore one bad source
+      }
+    }
+
+    const text = [
+      `Search query: ${sq}`,
+      `RAG query: ${rq}`,
+      "",
+      all.join("\n\n---\n\n") || "(no relevant excerpts found)",
+    ].join("\n").slice(0, maxOut);
+
+    return { ok: true, status: 200, statusText: "OK", url: WebAgent.googleSearchUrl(sq), text, rawSize: text.length, textSize: text.length, sources };
+  }
+
+  static _inferAuthoritativeUrls(query) {
+    const s = String(query || "").toLowerCase();
+    const urls = [];
+
+    // Django-specific shortcuts are extremely high yield.
+    if (s.includes("django")) {
+      const m = s.match(/\b(\d+\.\d+)\b/);
+      const v = m ? m[1] : "5.0";
+
+      if (/(n\+1|n\s*\+\s*1|select_related|prefetch_related|prefetch)/.test(s)) {
+        urls.push(`https://docs.djangoproject.com/en/${v}/topics/db/optimization/`);
+        urls.push(`https://docs.djangoproject.com/en/${v}/ref/models/querysets/`);
+      }
+      if (/(?:sql\s*injection|injection|rawsql|extra\(|raw\s+sql)/.test(s)) {
+        urls.push(`https://docs.djangoproject.com/en/${v}/topics/security/`);
+        urls.push(`https://docs.djangoproject.com/en/${v}/topics/db/sql/`);
+      }
+    }
+
+    // Generic security fallback
+    if (/(sql\s*injection|injection)/.test(s)) {
+      urls.push("https://owasp.org/www-community/attacks/SQL_Injection");
+    }
+
+    return Array.from(new Set(urls));
+  }
+
+  static async _duckDuckGoHtmlUrls(query, opts = {}) {
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 15000;
+    const userAgent = opts.userAgent || "ZerathCode/1.0";
+    const q = encodeURIComponent(String(query || "").trim());
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${q}`;
+
+    const res = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": userAgent,
+        "Accept": "text/html",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const html = await res.text();
+
+    // DDG html format typically uses <a class="result__a" href="...">.
+    const urls = [];
+    const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const href = m[1];
+      // Sometimes direct, sometimes a redirect; handle both.
+      const u = WebAgent._normalizeCandidateUrl(href);
+      if (u) urls.push(u);
+      if (urls.length >= 6) break;
+    }
+
+    return Array.from(new Set(urls));
+  }
+
+  static _normalizeCandidateUrl(href) {
+    try {
+      const h = String(href || "");
+      if (h.startsWith("http://") || h.startsWith("https://")) return h;
+      // DDG redirect links sometimes look like "/l/?uddg=<encoded>"
+      if (h.startsWith("/l/") && h.includes("uddg=")) {
+        const u = new URL("https://duckduckgo.com" + h);
+        const raw = u.searchParams.get("uddg");
+        if (raw) return decodeURIComponent(raw);
+      }
+    } catch {}
+    return null;
+  }
+
+  static _selectRelevantExcerpts(text, query, cfg = {}) {
+    const maxSnippets = Number.isFinite(cfg.maxSnippets) ? cfg.maxSnippets : 6;
+    const snippetChars = Number.isFinite(cfg.snippetChars) ? cfg.snippetChars : 520;
+    const t = String(text || "");
+    const q = String(query || "");
+    const tokens = WebAgent._queryTokens(q);
+    if (!tokens.length || !t) return [];
+
+    const chunks = WebAgent._chunkText(t, 900, 140);
+    const scored = chunks
+      .map((c) => ({ c, score: WebAgent._scoreChunk(c, tokens) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxSnippets);
+
+    const out = [];
+    for (const { c } of scored) {
+      out.push(WebAgent._compactSnippet(c, snippetChars));
+    }
+    return out;
+  }
+
+  static _queryTokens(query) {
+    const s = String(query || "").toLowerCase().replace(/\+/g, " + ");
+    const raw = s.split(/[^a-z0-9+_]+/g).filter(Boolean);
+    const stop = new Set([
+      "the","and","or","in","on","to","for","of","a","an","is","are","was","were","be",
+      "how","what","why","when","where","which","like","something","about","version",
+      "prevent","prevention","fix","issue","problem","explain","tell","me",
+    ]);
+    const tokens = [];
+    for (const w of raw) {
+      if (w.length < 3) continue;
+      if (stop.has(w)) continue;
+      tokens.push(w);
+    }
+    return Array.from(new Set(tokens));
+  }
+
+  static _chunkText(text, size, overlap) {
+    const t = String(text || "");
+    const out = [];
+    if (!t) return out;
+    const step = Math.max(50, size - overlap);
+    for (let i = 0; i < t.length; i += step) {
+      out.push(t.slice(i, i + size));
+      if (out.length > 80) break; // hard cap to keep CPU predictable
+    }
+    return out;
+  }
+
+  static _scoreChunk(chunk, tokens) {
+    const c = String(chunk || "").toLowerCase();
+    let score = 0;
+    for (const tok of tokens) {
+      const re = new RegExp(WebAgent._escapeRegExp(tok), "g");
+      const m = c.match(re);
+      if (m) score += m.length;
+    }
+    // Boost for core Django ORM optimization terms.
+    if (c.includes("select_related")) score += 2;
+    if (c.includes("prefetch_related")) score += 2;
+    if (c.includes("sql injection")) score += 2;
+    return score;
+  }
+
+  static _escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  static _compactSnippet(s, maxChars) {
+    const t = String(s || "").replace(/\s{2,}/g, " ").trim();
+    if (t.length <= maxChars) return t;
+    return t.slice(0, maxChars - 1).trimEnd() + "…";
   }
 
   // Heuristic: used by Orchestrator as a fallback when the model forgets web_fetch.

@@ -64,6 +64,9 @@ Use direct URLs when you know them:
   web_fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot")
   web_fetch("https://finance.yahoo.com/quote/NVDA")
 
+TIP:
+- When calling web_fetch, include a "query" string so the tool can extract only the most relevant excerpts from the page(s).
+
 RESPONSE FORMAT — ONLY valid JSON arrays, nothing else:
 
 To answer directly:
@@ -73,7 +76,7 @@ To answer directly:
 
 To search first, then answer:
 [
-  { "action": "web_fetch", "params": { "url": "https://www.google.com/search?q=bitcoin+price+INR+today" } }
+  { "action": "web_fetch", "params": { "url": "https://www.google.com/search?q=bitcoin+price+INR+today", "query": "bitcoin price INR today" } }
 ]
 Then in the NEXT turn (after results are injected), answer:
 [
@@ -429,7 +432,7 @@ class Orchestrator {
           forcedWebOnce = true;
           const urls = WebAgent.autoFetchUrls(userInput);
           for (const url of urls) {
-            const text = await this._executeStep({ action: "web_fetch", params: { url } });
+            const text = await this._executeStep({ action: "web_fetch", params: { url, query: userInput } });
             if (text) {
               toolResults.push({ url, content: String(text).slice(0, 3000) });
               renderer.agentLog("web", "ok",
@@ -450,7 +453,7 @@ class Orchestrator {
 
       for (const step of steps) {
         const silent = suppressMessages && step.action === "message";
-        const result = await this._executeStep(step, { silent });
+        const result = await this._executeStep(step, { silent, query: userInput });
 
         if (step.action === "web_fetch" && result) {
           toolResults.push({
@@ -716,12 +719,18 @@ class Orchestrator {
         renderer.agentLog("web", "info", `Fetching ${params.url}`);
         this.memory.logAction("web", "fetch", params.url);
         try {
-          const out = await WebAgent.fetchText(params.url, {
+          const q = params.query || opts.query || "";
+          const out = await WebAgent.fetchRelevant(params.url, q, {
             timeoutMs: 15000,
             maxChars:  3000,
             userAgent: "ZerathCode/1.0",
           });
-          renderer.agentLog("web", "ok", `${out.status} — ${out.text.length} chars`);
+          const srcCount = Array.isArray(out.sources) ? out.sources.length : 0;
+          renderer.agentLog(
+            "web",
+            "ok",
+            `${out.status} — ${out.text.length} chars` + (srcCount > 1 ? ` — ${srcCount} sources` : "")
+          );
           return out.text;
         } catch (err) {
           renderer.agentLog("web", "error", err.message);
