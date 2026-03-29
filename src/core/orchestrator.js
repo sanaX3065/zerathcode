@@ -84,10 +84,24 @@ ABSOLUTE RULES:
    - Backend:  Node.js with built-in http module OR express
    - React: ONLY via CDN <script> tags in HTML. Never via npm install.
    - Start command: ALWAYS "node server.js" — never parcel, vite, or webpack
-5. Last steps MUST be: npm install (if express used) then node server.js
-6. Add .gitignore that excludes node_modules
-7. End with a memory_note describing what was built
-8. All paths are relative to the project directory
+5. DATABASE CRITICAL RULE — READ THIS:
+   - NEVER use sqlite3 npm package — it requires native compilation (node-gyp) which ALWAYS fails on Termux ARM because Android NDK is not available.
+   - NEVER use better-sqlite3 — SAME PROBLEM. It also uses node-gyp and ALSO fails on Termux ARM.
+   - FOR SQLITE: ALWAYS use "sql.js" package (npm install sql.js). It is pure JavaScript/WASM with zero native compilation.
+   - sql.js example:
+     const initSqlJs = require('sql.js');
+     let db;
+     initSqlJs().then(SQL => {
+       db = new SQL.Database();
+       db.run('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)');
+     });
+     // Query: const result = db.exec('SELECT * FROM users'); const rows = result[0]?.values || [];
+     // Insert: db.run('INSERT INTO users VALUES (?,?)', [null, name]);
+6. Last steps MUST be: npm install then node server.js
+7. Add .gitignore that excludes node_modules
+8. End with a memory_note describing what was built
+9. All paths are relative to the project directory
+10. Write SYNTACTICALLY VALID JavaScript — check every bracket, parenthesis, and brace is closed. Template literals must use backticks. No mixed quote styles inside the same string.
 
 REQUIRED STRUCTURE (copy this pattern every time):
 [
@@ -432,7 +446,46 @@ class Orchestrator {
             `mkdir ${path.relative(this.workDir, dir) || "."}/`);
         }
 
-        const content = params.content || "";
+        let content = params.content || "";
+
+        // ── Proactive: rewrite sqlite3/better-sqlite3 → sql.js before writing ──
+        // Both require native compilation and cannot work on Termux ARM.
+        if (/require\(['"](?:sqlite3|better-sqlite3)['"]\)/.test(content)) {
+          renderer.agentLog("file", "warn",
+            `${rel}  ${C.yellow}sqlite3/better-sqlite3 detected — auto-rewriting to sql.js${C.reset}`);
+          content = content
+            .replace(/const\s+(\w+)\s*=\s*require\(['"](?:sqlite3|better-sqlite3)['"]\)(?:\.verbose\(\))?;?/g,
+              "const initSqlJs = require('sql.js');")
+            .replace(/new\s+(?:\w+\.)?Database\([^)]*\)(?:,\s*(?:function\s*)?\([^)]*\)\s*\{[^}]*\})?;?/g,
+              "// sql.js: init via: const SQL = await initSqlJs(); const db = new SQL.Database();");
+        }
+
+        // ── JS syntax pre-validation (catches AI-generated malformed code) ────
+        const ext_ = path.extname(fp).slice(1).toLowerCase();
+        if ((ext_ === "js" || ext_ === "ts") && content.length > 0) {
+          try {
+            // Use Node's built-in require/parse check via vm module
+            const vm = require("vm");
+            new vm.Script(content, { filename: rel });
+          } catch (syntaxErr) {
+            renderer.agentLog("file", "warn",
+              `${rel}  ${C.yellow}SYNTAX ERROR in AI-generated code: ${syntaxErr.message.slice(0, 80)}${C.reset}`);
+            renderer.agentLog("file", "warn",
+              `${rel}  ${C.grey}File written but may need manual fix. Check line numbers above.${C.reset}`);
+            // Still write it so the user can see and fix it, but log prominently
+            this.memory.logError(rel, `AI generated syntax error: ${syntaxErr.message}`);
+          }
+        }
+
+        // ── JSON validation ───────────────────────────────────────────────────
+        if (ext_ === "json" && content.length > 0) {
+          try { JSON.parse(content); } catch (jsonErr) {
+            renderer.agentLog("file", "warn",
+              `${rel}  ${C.yellow}INVALID JSON: ${jsonErr.message.slice(0, 80)}${C.reset}`);
+            this.memory.logError(rel, `AI generated invalid JSON: ${jsonErr.message}`);
+          }
+        }
+
         fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
 
         const ext  = path.extname(fp).slice(1).toLowerCase();

@@ -22,7 +22,8 @@ const renderer       = require("../ui/renderer");
 const MAX_ATTEMPTS = 3;
 
 // Known Termux / Node 22+ incompatible native packages
-const TERMUX_NATIVE_FAIL = /sqlite3.*prebuild-install|prebuild-install.*sqlite3|Cannot find module 'ini'|Cannot find module 'simple-concat'|Cannot find module 'readable-stream'/;
+// Catches: sqlite3, better-sqlite3, any prebuild-install / gyp failure on ARM
+const TERMUX_NATIVE_FAIL = /sqlite3.*prebuild-install|prebuild-install.*sqlite3|Cannot find module 'ini'|Cannot find module 'simple-concat'|Cannot find module 'readable-stream'|better-sqlite3.*prebuild|prebuild-install.*better-sqlite3|android_ndk_path|Undefined variable android_ndk_path/;
 const TERMUX_ESBUILD_FAIL = /Cannot find package.*esbuild|ERR_MODULE_NOT_FOUND.*esbuild/;
 
 // Error patterns that indicate something fixable
@@ -134,7 +135,9 @@ class SelfHealingAgent {
 
   // ── Termux / platform-specific known fixes (called before AI) ────────────
   async _applyTermuxKnownFix(errorOutput, workDir) {
-    // ── sqlite3 native compilation fails on Termux ARM ─────────────────────
+    // ── sqlite3 / better-sqlite3 native compilation fails on Termux ARM ───────
+    // Both packages require node-gyp + android NDK which is never available.
+    // The only zero-native-compilation SQLite option is sql.js (pure WASM/JS).
     if (TERMUX_NATIVE_FAIL.test(errorOutput)) {
       const pkgPath = path.join(workDir, "package.json");
       if (!fs.existsSync(pkgPath)) return false;
@@ -142,46 +145,50 @@ class SelfHealingAgent {
       let pkg;
       try { pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")); } catch { return false; }
 
-      const hasSqlite3 = pkg.dependencies?.sqlite3 || pkg.devDependencies?.sqlite3;
-      if (!hasSqlite3) {
-        // sqlite3 not in package.json but still failing — wipe node_modules/sqlite3
+      const hasSqlite3       = pkg.dependencies?.sqlite3 || pkg.devDependencies?.sqlite3;
+      const hasBetterSqlite3 = pkg.dependencies?.["better-sqlite3"] || pkg.devDependencies?.["better-sqlite3"];
+
+      if (!hasSqlite3 && !hasBetterSqlite3) {
+        // Broken native addon is a transitive dep — wipe node_modules for both and retry
         renderer.agentLog("system", "warn",
-          "sqlite3 native build broken — removing bad node_modules entry");
-        try {
-          const badDir = path.join(workDir, "node_modules", "sqlite3");
-          if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true });
-        } catch {}
-        return false; // let npm install retry without it
+          "Native addon compile failure — cleaning broken node_modules entries");
+        for (const bad of ["sqlite3", "better-sqlite3"]) {
+          const badDir = path.join(workDir, "node_modules", bad);
+          try { if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true }); } catch {}
+        }
+        return false;
       }
 
       renderer.agentLog("system", "warn",
-        "sqlite3 cannot compile on Termux ARM — switching to better-sqlite3");
+        "sqlite3/better-sqlite3 cannot compile on Termux ARM (no NDK) — switching to sql.js (pure JS)");
 
-      // Patch package.json
-      if (pkg.dependencies?.sqlite3)    delete pkg.dependencies.sqlite3;
-      if (pkg.devDependencies?.sqlite3) delete pkg.devDependencies.sqlite3;
+      // Patch package.json: remove both native variants, add sql.js
+      if (pkg.dependencies?.sqlite3)              delete pkg.dependencies.sqlite3;
+      if (pkg.devDependencies?.sqlite3)           delete pkg.devDependencies.sqlite3;
+      if (pkg.dependencies?.["better-sqlite3"])   delete pkg.dependencies["better-sqlite3"];
+      if (pkg.devDependencies?.["better-sqlite3"]) delete pkg.devDependencies["better-sqlite3"];
       if (!pkg.dependencies) pkg.dependencies = {};
-      pkg.dependencies["better-sqlite3"] = "^9.4.3";
+      pkg.dependencies["sql.js"] = "^1.10.3";
       fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2), "utf8");
-      renderer.agentLog("file", "edit", "package.json — sqlite3 → better-sqlite3");
+      renderer.agentLog("file", "edit", "package.json — sqlite3/better-sqlite3 → sql.js");
 
-      // Patch server files: convert sqlite3 API to better-sqlite3 sync API
-      const candidates = ["server.js", "index.js", "app.js", "db.js", "src/db.js"];
+      // Wipe broken node_modules entries
+      for (const bad of ["sqlite3", "better-sqlite3"]) {
+        const badDir = path.join(workDir, "node_modules", bad);
+        try { if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true }); } catch {}
+      }
+
+      // Patch server files: rewrite sqlite usage to sql.js async API
+      const candidates = ["server.js", "index.js", "app.js", "db.js", "database.js", "src/db.js"];
       for (const c of candidates) {
         const fp = path.join(workDir, c);
         if (!fs.existsSync(fp)) continue;
         let content = fs.readFileSync(fp, "utf8");
-        if (!content.includes("sqlite3")) continue;
-        content = this._convertSqlite3ToBetter(content);
+        if (!content.includes("sqlite3") && !content.includes("better-sqlite3")) continue;
+        content = this._convertToSqlJs(content);
         fs.writeFileSync(fp, content, "utf8");
-        renderer.agentLog("file", "edit", `${c} — updated to better-sqlite3 sync API`);
+        renderer.agentLog("file", "edit", `${c} — rewritten to sql.js API`);
       }
-
-      // Remove broken node_modules/sqlite3
-      try {
-        const badDir = path.join(workDir, "node_modules", "sqlite3");
-        if (fs.existsSync(badDir)) fs.rmSync(badDir, { recursive: true, force: true });
-      } catch {}
 
       return true;
     }
@@ -205,7 +212,63 @@ class SelfHealingAgent {
     return false;
   }
 
+  // ── Convert sqlite3 / better-sqlite3 to sql.js async API ─────────────────
+  // sql.js is pure JS (WASM), zero native compilation, works on all Termux/Node versions.
+  // It uses a callback-free Promise API.
+  _convertToSqlJs(content) {
+    let c = content;
+
+    // Replace require lines with sql.js initializer
+    c = c.replace(
+      /const\s+\w+\s*=\s*require\(['"](?:sqlite3|better-sqlite3)['"]\)(?:\.verbose\(\))?;?\s*/g,
+      "const initSqlJs = require('sql.js');\n"
+    );
+
+    // Replace new sqlite3.Database / new Database(path) with sql.js init block
+    // Insert async init at the top-level (wrapped in IIFE so it doesn't break existing structure)
+    c = c.replace(
+      /(?:const\s+\w+\s*=\s*)?new\s+(?:\w+\.)?Database\(([^)]+)\)(?:,\s*(?:function\s*)?\([^)]*\)\s*\{[^}]*\})?;?/g,
+      (match, dbPath) => {
+        return `// sql.js init (async, pure JS — no native compilation)\nlet db;\n(async () => { const SQL = await initSqlJs(); db = new SQL.Database(); })();`;
+      }
+    );
+
+    // Convert db.serialize(() => { ... }) → just the block content
+    c = c.replace(/\w+\.serialize\s*\(\s*(?:function\s*)?\(\s*\)\s*\{/g, "{");
+
+    // Convert db.run(sql) → db.run(sql) (sql.js uses same .run() but sync for DDL)
+    // Keep as-is for DDL, but wrap callbacks
+    c = c.replace(
+      /(\w+)\.run\((`[^`]+`|'[^']+'|"[^"]+")\s*\);/g,
+      (m, dbVar, sql) => `${dbVar}.run(${sql});`
+    );
+
+    // Convert db.run(sql, params, callback) → synchronous with sql.js
+    c = c.replace(
+      /(\w+)\.run\(([^,]+),\s*(\[[^\]]*\]),\s*function\s*\([^)]*\)\s*\{([^}]*)\}\s*\)/g,
+      (m, dbVar, sql, params, body) =>
+        `(() => { try { ${dbVar}.run(${sql}, ${params}); ${body.includes("this.lastID") ? "const lastID = ${dbVar}.exec('SELECT last_insert_rowid()')[0]?.values[0][0];" : ""} } catch(_e) { console.error(_e); } })()`
+    );
+
+    // Convert db.get → db.exec (returns rows array)
+    c = c.replace(
+      /(\w+)\.get\(([^,]+),\s*(\[[^\]]*\]),\s*function\s*\(err,\s*(\w+)\)\s*\{/g,
+      (m, dbVar, sql, params, rowVar) =>
+        `(() => { const _rows = ${dbVar}.exec(${sql}, ${params}); const ${rowVar} = _rows[0] ? Object.fromEntries(_rows[0].columns.map((c,i) => [c, _rows[0].values[0][i]])) : null; if(true) {`
+    );
+
+    // Convert db.all → db.exec
+    c = c.replace(
+      /(\w+)\.all\(([^,]+),\s*(\[[^\]]*\]),\s*function\s*\(err,\s*(\w+)\)\s*\{/g,
+      (m, dbVar, sql, params, rowsVar) =>
+        `(() => { const _res = ${dbVar}.exec(${sql}, ${params}); const ${rowsVar} = _res[0] ? _res[0].values.map(r => Object.fromEntries(_res[0].columns.map((c,i) => [c,r[i]]))) : []; if(true) {`
+    );
+
+    return c;
+  }
+
   // ── Convert sqlite3 callback-style to better-sqlite3 sync style ───────────
+  // KEPT FOR REFERENCE — no longer used (better-sqlite3 also fails on Termux ARM)
   _convertSqlite3ToBetter(content) {
     let c = content;
 
@@ -269,11 +332,17 @@ ${filesContext}
 ${ctx}
 
 TERMUX RULES (critical — these apply to ALL fixes):
-- NEVER suggest sqlite3 as a dependency — it cannot compile on Termux ARM. Use better-sqlite3 instead.
-- NEVER suggest vite or esbuild native rebuilds — they don't work on Termux Node 22+.
-- If the error is a missing module inside node_modules (ini, simple-concat, readable-stream), it means a native addon (like sqlite3) is broken. Fix by replacing that addon.
-- For database: always use better-sqlite3 (synchronous API, no callbacks).
-- For frontend bundling: never use vite/parcel/webpack. Use plain HTML+CSS+JS in a public/ folder served by Express.
+- NEVER suggest sqlite3 as a dependency — it requires node-gyp/NDK and CANNOT compile on Termux ARM. Period.
+- NEVER suggest better-sqlite3 as a dependency — SAME PROBLEM. It also uses node-gyp and also CANNOT compile on Termux ARM. Do not suggest it as a fix for sqlite3.
+- FOR ANY DATABASE/SQLITE NEED: use "sql.js" (npm install sql.js). It is pure JavaScript/WASM with ZERO native compilation.
+  sql.js example:
+    const initSqlJs = require('sql.js');
+    initSqlJs().then(SQL => { const db = new SQL.Database(); db.run('CREATE TABLE ...'); });
+    To query: const result = db.exec('SELECT * FROM t WHERE x=?', [val]); const rows = result[0]?.values || [];
+    To insert: db.run('INSERT INTO t VALUES (?,?)', [a, b]);
+- If you see "Cannot find module 'ini'", "Cannot find module 'simple-concat'", "android_ndk_path" in a gyp error — these all mean a native addon is broken. Replace that addon with a pure-JS alternative.
+- NEVER suggest vite or esbuild — they don't work on Termux Node 22+. Use plain HTML+CSS+JS in public/ folder.
+- For frontend bundling: never use vite/parcel/webpack. Use Express + static files.
 - npm install --ignore-scripts can bypass failed postinstall scripts.
 
 RULES:
