@@ -20,6 +20,8 @@ class DeviceBridge extends EventEmitter {
     this.server       = new WebSocketBridgeServer({ port: opts.port || 8765 });
     this._lastState   = null;
     this._started     = false;
+    this._provider    = opts.provider;    // "gemini" | "anthropic" | "openai"
+    this._keyManager  = opts.keyManager;  // API key manager instance
     this._bindServerEvents();
   }
 
@@ -28,6 +30,28 @@ class DeviceBridge extends EventEmitter {
   start() {
     if (this._started) return this;
     this.server.start();
+
+    // Phase 4: Wire documentEmbedder and proactiveAgent
+    if (this._provider && this._keyManager) {
+      try {
+        const { getDocumentEmbedder } = require("./documentEmbedder");
+        const ProactiveAgent = require("./proactiveAgent");
+
+        const embedder = getDocumentEmbedder();
+        embedder.init().catch(() => {});  // pre-warm the model
+
+        this.server.documentEmbedder = embedder;
+        this.server.proactiveAgent   = new ProactiveAgent({
+            provider:   this._provider,
+            keyManager: this._keyManager,
+        });
+
+        renderer.agentLog("system", "ok", "Phase 4 services ready (hybrid retrieval + proactive)");
+      } catch (err) {
+        renderer.agentLog("system", "warn", `Phase 4 initialization failed: ${err.message}`);
+      }
+    }
+
     this._started = true;
     return this;
   }

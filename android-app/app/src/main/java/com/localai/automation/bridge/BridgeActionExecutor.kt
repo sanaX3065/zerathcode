@@ -4,8 +4,8 @@ import android.content.Context
 import android.media.AudioManager
 import android.provider.Settings
 import android.util.Log
+import com.localai.automation.actions.Phase2ActionExecutor
 import com.localai.automation.data.repository.LocalRepository
-import com.localai.automation.engine.ActionExecutor
 import com.localai.automation.models.ActionType
 import com.localai.automation.models.AgentAction
 import kotlinx.coroutines.CoroutineScope
@@ -13,9 +13,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Handles ACTION and QUERY messages received from the AI bridge.
- * Converts the bridge message into an AgentAction and hands off to ActionExecutor.
- * Sends ACK or ERROR back through the bridge when done.
+ * BridgeActionExecutor — Phase 2 update
+ *
+ * Now uses Phase2ActionExecutor which handles all action types
+ * including calendar, alarms, WiFi, Bluetooth, DND, SMS, apps.
+ *
+ * The QUERY_CALENDAR action returns structured data in the ack payload
+ * so the AI can read calendar contents.
  */
 class BridgeActionExecutor(
     private val context: Context,
@@ -26,7 +30,8 @@ class BridgeActionExecutor(
         private const val TAG = "BridgeActionExecutor"
     }
 
-    private val executor = ActionExecutor(context, repository)
+    // Phase 2: handles all action types
+    private val executor = Phase2ActionExecutor(context, repository)
     private val scope    = CoroutineScope(Dispatchers.IO)
 
     // ── Entry point ───────────────────────────────────────────────────────────
@@ -55,21 +60,9 @@ class BridgeActionExecutor(
             Log.i(TAG, "Executing bridge action: ${action.actionType}")
 
             try {
-                val result = executor.execute(
-                    action,
-                    triggerReason = "AI bridge command"
-                )
-
-                val ackPayload = mapOf(
-                    "success"    to result.success,
-                    "message"    to result.message,
-                    "skipped"    to result.skipped,
-                    "actionType" to action.actionType.name
-                )
-
-                bridge.send(BridgeMessage.ack(message.id, ackPayload))
-                Log.i(TAG, "Action ${action.actionType} completed: ${result.message}")
-
+                val result = executor.execute(action, triggerReason = "AI bridge command")
+                bridge.send(BridgeMessage.ack(message.id, result.toAckPayload(action.actionType.name)))
+                Log.i(TAG, "Action ${action.actionType}: ${result.message}")
             } catch (e: Exception) {
                 Log.e(TAG, "Action execution threw: ${e.message}", e)
                 bridge.send(BridgeMessage.error(message.id, e.message ?: "Execution failed"))
@@ -91,6 +84,20 @@ class BridgeActionExecutor(
                         )
                     )
                 }
+                "calendar" -> {
+                    // Convenience: query next 7 days without a full action
+                    val now = System.currentTimeMillis()
+                    val fakeAction = AgentAction(
+                        actionType = ActionType.QUERY_CALENDAR,
+                        params = mapOf(
+                            "startMs" to now,
+                            "endMs"   to now + 7 * 24 * 60 * 60 * 1000L,
+                            "maxResults" to 20
+                        )
+                    )
+                    val result = executor.execute(fakeAction)
+                    bridge.send(BridgeMessage.ack(message.id, result.toAckPayload("QUERY_CALENDAR")))
+                }
                 else -> bridge.send(
                     BridgeMessage.error(message.id, "Unknown query: ${message.payload["query"]}")
                 )
@@ -101,8 +108,7 @@ class BridgeActionExecutor(
     // ── Handshake ─────────────────────────────────────────────────────────────
 
     private fun handleHandshake(message: BridgeMessage) {
-        Log.i(TAG, "Bridge handshake received. Server: ${message.payload["server"]}")
-        // Immediately push current state so AI has context
+        Log.i(TAG, "Bridge handshake from: ${message.payload["server"]}")
         scope.launch {
             val state = buildStateSnapshot()
             bridge.send(BridgeMessage.stateSnapshot(state = state))
@@ -139,52 +145,41 @@ class BridgeActionExecutor(
 
     fun buildStateSnapshot(): Map<String, Any> {
         return try {
-            // Ringer mode
             val audio = context.getSystemService(AudioManager::class.java)
             val ringerMode = when (audio.ringerMode) {
                 AudioManager.RINGER_MODE_SILENT  -> "SILENT"
                 AudioManager.RINGER_MODE_VIBRATE -> "VIBRATE"
                 else                              -> "NORMAL"
             }
-
-            // Brightness
-            val brightnessMode = Settings.System.getInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS_MODE,
-                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
-            )
             val brightness = Settings.System.getInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                128
-            )
-            val brightnessAuto = brightnessMode == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
-
-            // Battery
-            val batteryMgr = context.getSystemService(android.os.BatteryManager::class.java)
-            val batteryLevel  = batteryMgr.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            val isCharging    = batteryMgr.isCharging
-
-            // DND
-            val notifMgr = context.getSystemService(android.app.NotificationManager::class.java)
-            val dndGranted = notifMgr.isNotificationPolicyAccessGranted
+                context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+            val brightnessAuto = Settings.System.getInt(
+                context.contentResolver, Settings.System.SCREEN_BRIGHTNESS_MODE, 0) == 1
+            val batteryMgr   = context.getSystemService(android.os.BatteryManager::class.java)
+            val batteryLevel = batteryMgr.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            val isCharging   = batteryMgr.isCharging
+            val notifMgr     = context.getSystemService(android.app.NotificationManager::class.java)
 
             mapOf(
-                "ringerMode"       to ringerMode,
-                "brightness"       to brightness,
-                "brightnessAuto"   to brightnessAuto,
-                "batteryLevel"     to batteryLevel,
-                "isCharging"       to isCharging,
-                "dndPolicyGranted" to dndGranted,
+                "ringerMode"           to ringerMode,
+                "brightness"           to brightness,
+                "brightnessAuto"       to brightnessAuto,
+                "batteryLevel"         to batteryLevel,
+                "isCharging"           to isCharging,
+                "dndPolicyGranted"     to notifMgr.isNotificationPolicyAccessGranted,
                 "writeSettingsGranted" to Settings.System.canWrite(context),
-                "timestamp"        to System.currentTimeMillis()
+                "calendarGranted"      to hasPermission("android.permission.READ_CALENDAR"),
+                "smsGranted"           to hasPermission("android.permission.SEND_SMS"),
+                "timestamp"            to System.currentTimeMillis()
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to build state snapshot: ${e.message}")
-            mapOf(
-                "error"     to "Failed to read device state",
-                "timestamp" to System.currentTimeMillis()
-            )
+            mapOf("error" to "Failed to read device state", "timestamp" to System.currentTimeMillis())
         }
+    }
+
+    private fun hasPermission(permission: String): Boolean {
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            context, permission
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 }

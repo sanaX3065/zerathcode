@@ -40,6 +40,26 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- ── Phase 2: Calendar ──────────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+
+    <!-- ── Phase 2: Alarms ───────────────────────────────────────────────── -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!-- ── Phase 2: Connectivity ─────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- ── Phase 2: SMS ───────────────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+
     <application
         android:name=".LocalAIApp"
         android:allowBackup="true"
@@ -100,6 +120,12 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- ── Phase 2: AlarmReceiver ─────────────────────────────────────────── -->
+        <receiver
+            android:name=".actions.AlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
     </application>
 

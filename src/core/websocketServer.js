@@ -26,6 +26,8 @@ class WebSocketBridgeServer extends EventEmitter {
     this.clients       = new Map();   // clientId → { ws, connectedAt, lastPong }
     this.pendingAcks   = new Map();   // messageId → { resolve, reject, timeoutHandle }
     this._heartbeatTimer = null;
+    this.documentEmbedder = null;   // set after construction (Phase 4)
+    this.proactiveAgent   = null;   // set after construction (Phase 4)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -164,6 +166,54 @@ class WebSocketBridgeServer extends EventEmitter {
       return;
     }
 
+    // Phase 4: semantic embedding
+    if (["embed_query", "embed_chunks", "score_chunks"].includes(type)) {
+      if (this.documentEmbedder) {
+        this.documentEmbedder.handle({ id, type, payload })
+            .then((response) => { if (response) this._sendTo(this._getClientWs(clientId), response); })
+            .catch((err) => {
+                const ws = this._getClientWs(clientId);
+                if (ws) this._sendTo(ws, {
+                    id, type: "error",
+                    payload: { message: err.message },
+                    timestamp: Date.now(),
+                });
+            });
+      } else {
+        const ws = this._getClientWs(clientId);
+        if (ws) this._sendTo(ws, {
+            id, type: "error",
+            payload: { message: "Embedding service not running" },
+            timestamp: Date.now(),
+        });
+      }
+      return;
+    }
+
+    // Phase 4: proactive agent
+    if (["analyze_events", "explain_pattern"].includes(type)) {
+      if (this.proactiveAgent) {
+        this.proactiveAgent.handle({ id, type, payload })
+            .then((response) => { if (response) this._sendTo(this._getClientWs(clientId), response); })
+            .catch((err) => {
+                const ws = this._getClientWs(clientId);
+                if (ws) this._sendTo(ws, {
+                    id, type: "error",
+                    payload: { message: err.message },
+                    timestamp: Date.now(),
+                });
+            });
+      } else {
+        const ws = this._getClientWs(clientId);
+        if (ws) this._sendTo(ws, {
+            id, type: "error",
+            payload: { message: "Proactive agent not running" },
+            timestamp: Date.now(),
+        });
+      }
+      return;
+    }
+
     renderer.agentLog("system", "warn", `Unhandled message type: ${type}`);
   }
 
@@ -182,6 +232,10 @@ class WebSocketBridgeServer extends EventEmitter {
       if (ws.readyState === WebSocket.OPEN) return ws;
     }
     return null;
+  }
+
+  _getClientWs(clientId) {
+    return this.clients.get(clientId)?.ws || null;
   }
 
   // ── Public API (used by DeviceBridge / Orchestrator) ─────────────────────

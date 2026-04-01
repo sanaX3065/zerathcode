@@ -32,7 +32,18 @@ data class AgentEvent(
     }
 }
 
-enum class ActionType { SET_SILENT_MODE, SET_VIBRATION, SET_BRIGHTNESS, SEND_NOTIFICATION, LOG_ONLY }
+enum class ActionType {
+    // Phase 1
+    SET_SILENT_MODE, SET_VIBRATION, SET_BRIGHTNESS, SEND_NOTIFICATION, LOG_ONLY,
+    // Phase 2 - Calendar
+    CREATE_CALENDAR_EVENT, DELETE_CALENDAR_EVENT, QUERY_CALENDAR,
+    // Phase 2 - Alarms
+    SET_ALARM, DISMISS_ALARM,
+    // Phase 2 - Connectivity
+    SET_WIFI, SET_BLUETOOTH, SET_DND_MODE,
+    // Phase 2 - Apps & SMS
+    LAUNCH_APP, SEND_SMS
+}
 enum class SilentMode { SILENT, VIBRATE, NORMAL }
 
 data class AgentAction(

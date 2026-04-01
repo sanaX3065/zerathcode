@@ -1,0 +1,8 @@
+Phase 2 — Complete. 16 files delivered.
+10 new action types across 4 domains:
+Calendar — CalendarAction.kt uses ContentResolver directly, no external libs. Creates events, deletes by ID, queries a time window and returns structured data the AI can read.
+Alarms — AlarmAction.kt has two paths: skipUi:false fires the standard clock app intent (user sees it), skipUi:true uses AlarmManager.setAlarmClock() silently. AlarmReceiver.kt handles the silent alarm firing and emits it back into the event pipeline.
+Connectivity — ConnectivityAction.kt handles WiFi (opens settings panel on API 29+), Bluetooth (direct on API ≤32, intent on API 33+), and DND via NotificationManager.setInterruptionFilter().
+Apps/SMS — AppAction.kt launches any installed app by package name, and sends SMS either via intent (user confirms) or SmsManager directly (silent, requires permission).
+Key architectural point: Phase2ActionExecutor.kt is the single router — it handles all 15 action types and falls back to the Phase 1 executor for the originals. BridgeActionExecutor now uses this instead.
+The fullAiOrchestrator.js system prompt is now built dynamically from ACTION_SCHEMAS so adding a new action in Phase 3 only requires one place to update.

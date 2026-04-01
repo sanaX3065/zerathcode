@@ -1,62 +1,74 @@
 /**
  * src/core/fullAiOrchestrator.js
- * ZerathCode — Full AI Mode Orchestrator
+ * ZerathCode — Full AI Mode Orchestrator (Phase 2)
  *
- * Handles the fullai REPL mode.
- * Parses user intent → generates action plan → executes via DeviceBridge.
- * This is the "unified control loop" from the platform vision.
- *
- * Flow:
- *   User Prompt
- *     → fetch device state (context)
- *     → AI: parse intent + plan actions
- *     → execute actions via bridge
- *     → fetch updated state (feedback)
- *     → AI: summarise result
+ * Phase 2 adds calendar, alarm, WiFi, Bluetooth, DND, SMS, app launch
+ * to the action space the AI can use.
  */
 
 "use strict";
 
-const AiClient       = require("../utils/aiClient");
+const AiClient            = require("../utils/aiClient");
 const { getDeviceBridge } = require("./deviceBridge");
-const renderer       = require("../ui/renderer");
-const { C }          = require("../ui/renderer");
-const { ActionType } = require("./bridgeProtocol");
+const renderer            = require("../ui/renderer");
+const { C }               = require("../ui/renderer");
+const { ActionType, ACTION_SCHEMAS } = require("./bridgeProtocol");
 
-// ── System prompt for fullai mode ─────────────────────────────────────────────
-const FULLAI_SYSTEM_PROMPT = `You are the ZerathCode Mobile AI Agent — a persistent intelligence layer
+// ── Build system prompt dynamically from ACTION_SCHEMAS ───────────────────────
+function buildSystemPrompt() {
+  const actionDocs = Object.entries(ACTION_SCHEMAS)
+    .map(([name, params]) => {
+      const paramStr = Object.entries(params)
+        .map(([k, v]) => `      ${k}: ${v}`)
+        .join("\n");
+      return `  ${name}\n    params:\n${paramStr}`;
+    })
+    .join("\n\n");
+
+  return `You are the ZerathCode Mobile AI Agent — a persistent intelligence layer
 controlling an Android device in real-time via a WebSocket bridge.
 
 You receive:
-- DEVICE STATE: current device snapshot (brightness, ringer, battery, location, etc.)
+- DEVICE STATE: current device snapshot (brightness, ringer, battery, permissions, etc.)
 - USER INTENT: what the user wants to happen
 
 You respond with ONLY a valid JSON array of action steps.
 
-AVAILABLE ACTIONS (use exact actionType strings):
-  SET_SILENT_MODE    params: { mode: "SILENT"|"VIBRATE"|"NORMAL" }
-  SET_BRIGHTNESS     params: { level: 0-255, auto: boolean }
-  SET_VIBRATION      params: { level: 0|1 }
-  SEND_NOTIFICATION  params: { title: string, text: string }
-  LOG_ONLY           params: { message: string }
+AVAILABLE ACTIONS:
+${actionDocs}
 
-RESPONSE FORMAT:
+CALENDAR NOTES:
+- Times are epoch milliseconds. Convert "tomorrow at 3pm" to the correct epoch value.
+- Always use QUERY_CALENDAR first if the user asks about existing events.
+- If calendarGranted is false in device state, inform user to grant READ/WRITE_CALENDAR.
+
+ALARM NOTES:
+- Use SET_ALARM with skipUi:false for user-visible alarms (recommended).
+- Use skipUi:true only when automation requires silent scheduling.
+
+CONNECTIVITY NOTES:
+- On Android 10+, SET_WIFI opens the settings panel (user confirms).
+- SET_BLUETOOTH on Android 13+ also requires user confirmation.
+- SET_DND_MODE requires dndPolicyGranted:true in device state.
+
+RESPONSE FORMAT (always this exact structure):
 [
-  { "action": "think",  "params": { "reasoning": "Brief reasoning here" } },
-  { "action": "device", "params": { "actionType": "SET_SILENT_MODE", "params": { "mode": "SILENT" }, "priority": 0.9 } },
-  { "action": "message","params": { "text": "Done — your phone is now on silent." } }
+  { "action": "think",  "params": { "reasoning": "Brief step-by-step reasoning" } },
+  { "action": "device", "params": { "actionType": "SET_ALARM", "params": { "hour": 7, "minute": 30, "label": "Wake up" }, "priority": 0.9 } },
+  { "action": "message","params": { "text": "Alarm set for 7:30 AM." } }
 ]
 
 RULES:
-1. Always start with a "think" step explaining your reasoning.
+1. Always start with a "think" step. Reason explicitly about: what the user wants, what device state says, what actions to take.
 2. Use "device" steps for all device actions — never invent action types.
-3. End with a "message" step summarising what was done.
-4. If intent is unclear, use a "message" step to ask for clarification — no device actions.
-5. If device state shows action already satisfied, skip it and explain.
-6. NEVER fabricate action results — only report what actually executed.
-7. Return ONLY the JSON array. Nothing before or after [].
+3. End with a "message" step summarising exactly what was done or why something failed.
+4. Check device state BEFORE acting. If a permission is missing, explain it in the message.
+5. For time-based actions, compute epoch ms correctly. Current time is in device state timestamp.
+6. NEVER fabricate results. If bridge returns failure, report it honestly.
+7. Return ONLY the JSON array. Nothing before [ or after ].
 
 FINAL REMINDER: Your response must start with [ and end with ]. No text outside the array.`;
+}
 
 class FullAiOrchestrator {
   constructor(opts) {
@@ -65,38 +77,36 @@ class FullAiOrchestrator {
     this.memory     = opts.memory;
     this.bridge     = getDeviceBridge();
     this.ai         = new AiClient(opts.keyManager);
+    this._systemPrompt = buildSystemPrompt();
   }
 
   async process(userInput) {
     this.memory.addUserMessage(userInput);
     renderer.userMessage(userInput);
 
-    // ── Step 1: Get device context ────────────────────────────────────────
+    // ── Step 1: Fetch device state ─────────────────────────────────────────
     let deviceState = this.bridge.getLastKnownState();
 
     if (this.bridge.isDeviceConnected()) {
       try {
         deviceState = await this.bridge.fetchState();
         renderer.agentLog("system", "ok",
-          `Device state: battery=${deviceState.batteryLevel}%  ringer=${deviceState.ringerMode}`);
+          `Device: battery=${deviceState.batteryLevel}% ringer=${deviceState.ringerMode}`);
       } catch (err) {
-        renderer.agentLog("system", "warn", `Could not fetch device state: ${err.message}`);
+        renderer.agentLog("system", "warn", `State fetch failed: ${err.message}`);
       }
     } else {
-      renderer.agentLog("system", "warn",
-        "No device connected — running in planning-only mode");
+      renderer.agentLog("system", "warn", "No device connected — planning-only mode");
     }
 
-    // ── Step 2: Build prompt with device context ───────────────────────────
+    // ── Step 2: AI call ────────────────────────────────────────────────────
     const prompt = this._buildPrompt(userInput, deviceState);
-
     renderer.agentLog("ai", "info", `Planning with ${this.provider}…`);
 
-    // ── Step 3: Get AI plan ───────────────────────────────────────────────
     let raw;
     try {
       raw = await this.ai.ask(this.provider, prompt, {
-        systemPrompt: FULLAI_SYSTEM_PROMPT,
+        systemPrompt: this._systemPrompt,
         maxTokens:    2048,
       });
     } catch (err) {
@@ -110,20 +120,19 @@ class FullAiOrchestrator {
       return;
     }
 
-    // ── Step 4: Execute steps ─────────────────────────────────────────────
+    // ── Step 3: Execute ────────────────────────────────────────────────────
     let assistantSummary = "";
-
     for (const step of steps) {
       const result = await this._executeStep(step);
       if (result) assistantSummary += result + "\n";
     }
 
-    // ── Step 5: Post-execution state feedback ─────────────────────────────
+    // ── Step 4: Post-execution state ───────────────────────────────────────
     if (this.bridge.isDeviceConnected()) {
       try {
         const newState = await this.bridge.fetchState();
         renderer.agentLog("system", "info",
-          `Updated state: ringer=${newState.ringerMode}  brightness=${newState.brightness}`);
+          `State after: ringer=${newState.ringerMode} brightness=${newState.brightness}`);
       } catch {}
     }
 
@@ -139,7 +148,7 @@ class FullAiOrchestrator {
 
     switch (action) {
       case "think": {
-        renderer.agentLog("ai", "plan", params.reasoning?.slice(0, 100) || "Thinking…");
+        renderer.agentLog("ai", "plan", params.reasoning?.slice(0, 120) || "Thinking…");
         return null;
       }
 
@@ -152,17 +161,22 @@ class FullAiOrchestrator {
         }
 
         if (!this.bridge.isDeviceConnected()) {
-          renderer.agentLog("system", "warn",
-            `Cannot execute ${actionType} — no device connected`);
+          renderer.agentLog("system", "warn", `Cannot execute ${actionType} — no device`);
           return `[Planned] ${actionType} — device not connected`;
         }
 
         try {
           const result = await this.bridge.execute(actionType, actionParams || {}, priority || 0.8);
+
+          // If result contains calendar data, display it
+          if (result?.data?.events) {
+            this._displayCalendarEvents(result.data.events);
+          }
+
           return result?.message || null;
         } catch (err) {
-          renderer.agentLog("system", "error", `Bridge action failed: ${err.message}`);
-          return null;
+          renderer.agentLog("system", "error", `Bridge error: ${err.message}`);
+          return `Error executing ${actionType}: ${err.message}`;
         }
       }
 
@@ -172,16 +186,33 @@ class FullAiOrchestrator {
       }
 
       case "plan": {
-        if (Array.isArray(params.steps)) {
-          renderer.planBlock(params.steps);
-        }
+        if (Array.isArray(params.steps)) renderer.planBlock(params.steps);
         return null;
       }
 
       default:
-        renderer.agentLog("system", "warn", `Unknown step action: "${action}"`);
+        renderer.agentLog("system", "warn", `Unknown step: "${action}"`);
         return null;
     }
+  }
+
+  // ── Calendar display helper ────────────────────────────────────────────────
+
+  _displayCalendarEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) {
+      renderer.agentLog("system", "info", "No calendar events found in range");
+      return;
+    }
+
+    const { C } = require("../ui/renderer");
+    console.log(`\n${C.bcyan}── Calendar Events (${events.length}) ─────────────────────${C.reset}`);
+    events.forEach((e) => {
+      const start = new Date(e.startMs).toLocaleString();
+      const title = e.title || "(no title)";
+      const loc   = e.location ? `  📍 ${e.location}` : "";
+      console.log(`  ${C.yellow}${start}${C.reset}  ${title}${C.grey}${loc}${C.reset}`);
+    });
+    console.log("");
   }
 
   // ── Prompt builder ────────────────────────────────────────────────────────
@@ -206,19 +237,16 @@ class FullAiOrchestrator {
     ].filter(Boolean).join("\n");
   }
 
-  // ── Parse AI response ─────────────────────────────────────────────────────
+  // ── Parse AI JSON response ────────────────────────────────────────────────
 
   _parseSteps(raw) {
     if (!raw || typeof raw !== "string") return null;
     let str = raw.trim();
-
     const fence = str.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fence) str = fence[1].trim();
-
     const s = str.indexOf("[");
     const e = str.lastIndexOf("]");
     if (s === -1 || e === -1) return null;
-
     try {
       const parsed = JSON.parse(str.slice(s, e + 1));
       return Array.isArray(parsed)
@@ -229,9 +257,7 @@ class FullAiOrchestrator {
     }
   }
 
-  shutdown() {
-    // Bridge lifecycle managed separately
-  }
+  shutdown() {}
 }
 
 module.exports = FullAiOrchestrator;
