@@ -5,6 +5,8 @@ import com.localai.automation.data.entities.*
 import com.localai.automation.models.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.localai.automation.proactive.ProactiveSuggestionEntity
+import com.localai.automation.proactive.SuggestionStatus
 import kotlinx.coroutines.flow.Flow
 
 class LocalRepository(db: AppDatabase) {
@@ -15,6 +17,7 @@ class LocalRepository(db: AppDatabase) {
     private val actionDao      = db.actionDao()
     private val permissionDao  = db.permissionDao()
     private val chatDao        = db.chatDao()
+    private val suggestionDao  = db.proactiveSuggestionDao()
 
     private val gson = Gson()
 
@@ -87,7 +90,7 @@ class LocalRepository(db: AppDatabase) {
 
     /**
      * Insert an action into the database.
-     * @param triggerReason Human-readable explanation of what fired the rule.
+     * @param triggerReason Human-readable explanation of what caused this action.
      */
     suspend fun insertAction(action: AgentAction, triggerReason: String? = null): Long {
         return actionDao.insertAction(
@@ -130,6 +133,36 @@ class LocalRepository(db: AppDatabase) {
     }
 
     suspend fun clearChat() = chatDao.clearAll()
+
+    // ─── Proactive Suggestions ───────────────────────────────────────────────
+
+    fun getPendingSuggestions(): Flow<List<ProactiveSuggestionEntity>> = 
+        suggestionDao.getPendingSuggestions()
+
+    suspend fun acceptSuggestion(id: String): Boolean {
+        val suggestion = suggestionDao.getSuggestionById(id) ?: return false
+        
+        // 1. Create the rule
+        val ruleId = ruleDao.insertRule(
+            RuleEntity(
+                name          = suggestion.title,
+                conditionJson = suggestion.conditionJson,
+                actionJson    = suggestion.actionJson,
+                priority      = 0.5f // Default
+            )
+        )
+        
+        // 2. Update suggestion status
+        if (ruleId > 0) {
+            suggestionDao.updateStatus(id, SuggestionStatus.ACCEPTED)
+            return true
+        }
+        return false
+    }
+
+    suspend fun dismissSuggestion(id: String) {
+        suggestionDao.updateStatus(id, SuggestionStatus.DISMISSED)
+    }
 
     // ─── Rule Parsing Helper ─────────────────────────────────────────────────
 

@@ -136,7 +136,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // HexOverlord generated — sanaX3065
+        // Zerathcode generated — sanaX3065
         val textView = findViewById<TextView>(R.id.textView)
         textView.text = "Welcome to ${appName}!"
     }
@@ -151,7 +151,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
 import android.widget.TextView;
 
-// HexOverlord generated — sanaX3065
+// Zerathcode generated — sanaX3065
 public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {

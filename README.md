@@ -1,71 +1,76 @@
-# ZerathCode v2.0
-### Multi-Agent AI Dev System for Termux / Android
-**Author: sanaX3065 | Enhanced RAG Pipeline: March 2026**
+# ZerathCode v1.0
+**Multi-Agent AI Development System for Termux / Android**
 
 ---
 
-## 🎯 **What's New in v2.0: RAG Pipeline Overhaul**
+## Overview
 
-ZerathCode v2.0 includes a **comprehensive RAG (Retrieval-Augmented Generation) engine upgrade**:
+ZerathCode v1.0 is a production-ready, modular multi-agent AI system designed for full-stack development in resource-constrained environments (Termux/Android). It provides autonomous agents for file operations, web development, git workflows, infrastructure management, security analysis, QA automation, and Android native development—all orchestrated through a unified AI reasoning layer.
 
-✅ **Semantic retrieval** (vs keyword-only)  
-✅ **Intelligent query decomposition** (vs heuristics)  
-✅ **Source credibility ranking** (vs treating all equal)  
-✅ **Grounding enforcement** (no hallucinations)  
-✅ **Confidence scoring** (knows when data insufficient)  
-✅ **Proper HTML structure** (vs regex stripping)  
-✅ **Intermediate reasoning layer** (vs direct retrieval→answer)  
-✅ **12 sources** instead of 5 (better diversity)  
-
-**[→ See DELIVERABLES.md for complete list]**
+**Core Features:**
+- Zero external dependencies (all bundled)
+- Multi-provider AI support (Claude, Gemini, GPT)
+- Modular agent architecture with dependency injection
+- Real-time orchestration with self-healing capabilities
+- Device bridge protocol (WebSocket) for Android hardware integration
+- Semantic document embedding and retrieval-augmented generation (RAG)
+- Sandboxed file operations with permission management
 
 ---
 
 ## Table of Contents
 
-1. [What is ZerathCode?](#what-is-zerathcode)
-2. [What's New in v2.0](#whats-new-in-v20-rag-pipeline-overhaul)
-3. [Installation](#installation)
-4. [Quick Start](#quick-start)
-5. [Documentation](#documentation)
-6. [Full File Map — What Every File Does](#full-file-map)
-7. [How the CLI Works](#how-the-cli-works)
-8. [How the REPL Works](#how-the-repl-works)
-9. [How the Orchestrator Works](#how-the-orchestrator-works)
-10. [How Agents Work](#how-agents-work)
-11. [How to Wire a New Agent](#how-to-wire-a-new-agent)
-12. [API Key Management](#api-key-management)
-13. [Memory System](#memory-system)
-14. [Self-Healing Agent](#self-healing-agent)
-15. [System Monitor](#system-monitor)
-16. [Environment Variables](#environment-variables)
-17. [Troubleshooting](#troubleshooting)
-18. [Architecture Diagram](#architecture-diagram)
+1. [Architecture](#architecture)
+2. [Installation](#installation)
+3. [Quick Start](#quick-start)
+4. [Main Components](#main-components)
+5. [Agents](#agents)
+6. [Scaling the System](#scaling-the-system)
+7. [Configuration](#configuration)
 
 ---
 
-## Documentation (v2.0)
+## Architecture
 
-📄 **[DELIVERABLES.md](./DELIVERABLES.md)** — Complete v2.0 overhaul summary  
-📄 **[PIPELINE_IMPROVEMENTS.md](./PIPELINE_IMPROVEMENTS.md)** — Detailed architecture improvements  
-📄 **[FIX_SUMMARY.md](./FIX_SUMMARY.md)** — What was fixed and why  
-📄 **[INSTALL_UPGRADE.md](./INSTALL_UPGRADE.md)** — Installation & upgrade guide  
-📄 **[QUICK_REFERENCE.md](./QUICK_REFERENCE.md)** — v1.x to v2.0 comparison  
-
----
-
-## What is ZerathCode?
-
-ZerathCode is a **zero-dependency AI dev system** that runs entirely inside Termux on Android. It gives you a terminal interface where you describe what you want to build, and the AI agent creates the files, runs the commands, fixes errors automatically, and starts your app — all without leaving your phone.
-
-It supports three AI providers (Claude, Gemini, GPT) and four modes:
-
-| Mode | What it does |
-|---|---|
-| 💬 Chat | Ask coding questions, get code snippets (now with grounded answers!) |
-| 🌐 Full Stack | Build complete Node.js + HTML/CSS/JS web apps |
-| 📱 Mobile Dev | Build Android APKs with Kotlin + Gradle |
-| 🚀 Infrastructure | Deploy apps with PM2 + Cloudflare tunnel |
+```
+┌─────────────────────────────────────────────────────────┐
+│                      CLI Entry Point                     │
+│                  (bin/zerathcode.js)                     │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+        ┌──────────────────┼──────────────────┐
+        ▼                  ▼                  ▼
+   ┌─────────┐        ┌─────────┐       ┌─────────┐
+   │ Agent   │        │  REPL   │       │ Bridge  │
+   │ Manager │        │  Mode   │       │ Server  │
+   └────┬────┘        └────┬────┘       └────┬────┘
+        │                  │                 │
+        ├──────────────────┼─────────────────┤
+        │                  │                 │
+        ▼                  ▼                 ▼
+   ┌─────────────────────────────────────────────────┐
+   │            Orchestrator (Core AI Layer)        │
+   │  - Query Reasoning                              │
+   │  - File Context Injection                       │
+   │  - Document Embedding & RAG                     │
+   │  - Step Execution & Error Recovery              │
+   └─────────────────────────────────────────────────┘
+        │
+        ├─────────────────────────────────────┐
+        │                                     │
+   ┌────▼─────────┐                  ┌──────▼──────┐
+   │   Agents     │                  │   Utilities │
+   │              │                  │             │
+   │ • FileAgent  │                  │ • AI Client │
+   │ • WebAgent   │                  │ • Logger    │
+   │ • GitAgent   │                  │ • Sandbox   │
+   │ • InfraAgent │                  │ • Shell     │
+   │ • QAAgent    │                  │ • Embedder  │
+   │ • SecurityA. │                  │ • DOM Parse │
+   │ • AndroidA.  │                  │             │
+   │ • AssistantA.│                  └─────────────┘
+   └──────────────┘
+```
 
 ---
 
@@ -74,30 +79,339 @@ It supports three AI providers (Claude, Gemini, GPT) and four modes:
 ### Prerequisites
 
 ```bash
-# Required
+# Termux (required)
 pkg install nodejs git
 
-# For Mobile Dev mode
+# For Android development
 pkg install openjdk-17
 
-# Optional but recommended
-pkg install termux-api   # for notifications, battery, TTS
-pkg install cloudflared  # for public URLs
-# PM2 and nginx via npm if you want infra mode
+# Optional
+pkg install termux-api cloudflared
 ```
 
-### Install ZerathCode
+### Setup
 
 ```bash
-# 1. Copy zerathcode folder to your Termux home
-cp -r zerathcode ~/zerathcode
-
-# 2. Run the installer
-cd ~/zerathcode
+cd zerathcode
 bash install.sh
-
-# 3. Reload your shell
 source ~/.bashrc
+
+# Verify installation
+zerath help
+```
+
+---
+
+## Quick Start
+
+### Mode 1: Agent Command
+Execute a specific agent directly:
+
+```bash
+# File operations
+zerath file create src/index.js "console.log('hello')"
+zerath file read src/index.js
+
+# Web development
+zerath web build "Create a React todo app"
+
+# Git
+zerath git status
+
+# Infrastructure
+zerath infra deploy --pm2 --tunnel
+```
+
+### Mode 2: REPL (Interactive)
+```bash
+zerath repl
+# Opens interactive prompt:
+# > describe what you want to build
+# AI handles planning, file creation, error recovery
+```
+
+### Mode 3: Bridge (Device Integration)
+```bash
+zerath bridge
+# Starts WebSocket server on ws://localhost:8765
+# Android device connects and forwards hardware events
+# AI accesses device state (battery, location, calendar, etc.)
+```
+
+---
+
+## Main Components
+
+Each directory in `src/` is thoroughly documented:
+
+- **[src/agents/README.md](src/agents/README.md)** — Agent architecture and how to implement new agents
+- **[src/core/README.md](src/core/README.md)** — Orchestration, AI coordination, and state management
+- **[src/ui/README.md](src/ui/README.md)** — Terminal output rendering and user interaction
+- **[src/utils/README.md](src/utils/README.md)** — Core utilities (AI client, logging, sandboxing, etc.)
+- **[android-app/README.md](android-app/README.md)** — Android native bridge implementation
+
+---
+
+## Agents
+
+### Core Agents (Zerathcode)
+- **FileAgent** — CRUD operations on project files with security sandboxing
+- **WebAgent** — Full-stack web app generation (Node.js + HTML/CSS/JS)
+- **GitAgent** — Version control operations (clone, commit, push, branch management)
+
+### ZerathCode Agents
+- **AndroidAgent** — APK compilation and device deployment via bridge
+- **InfrastructureAgent** — PM2 deployment, process management, Cloudflare tunneling
+- **SecurityAgent** — Vulnerability scanning, secret detection, permission auditing
+- **QAAgent** — Automated testing, coverage analysis, test generation
+- **AssistantAgent** — Multi-turn conversation, code explanation, debugging support
+
+### System Modes
+- **BridgeServer** — WebSocket endpoint for Android device communication
+- **REPL** — Interactive development loop with error recovery
+- **FullAI Orchestrator** — Autonomous step execution with context injection
+
+---
+
+## Scaling the System
+
+### Adding a New Agent
+
+**Step 1: Create Agent File**
+
+Create `src/agents/myAgent.js`:
+
+```javascript
+"use strict";
+
+const BaseAgent = require("./baseAgent");
+
+/**
+ * MyAgent — Description of what this agent does
+ * 
+ * CAPABILITIES:
+ * - Capability 1
+ * - Capability 2
+ * 
+ * DEPENDENCIES:
+ * - Requires: permManager for file access
+ * - Requires: keyManager for API keys
+ */
+class MyAgent extends BaseAgent {
+  /**
+   * Entry point. Called by AgentManager.
+   * @param {string[]} args - Command arguments
+   */
+  async run(args) {
+    const [command, ...params] = args;
+
+    switch (command) {
+      case "action1":
+        return await this.action1(params);
+      case "action2":
+        return await this.action2(params);
+      default:
+        this.usageError(
+          "myagent <action1|action2> [params]"
+        );
+    }
+  }
+
+  async action1(params) {
+    // Check permissions if accessing files
+    const safePath = await this.safePath(params[0]);
+    
+    // Use sandboxed file operations
+    const result = await this.sandbox.read(safePath);
+    
+    // Log output
+    this.log.success("Operation completed");
+  }
+
+  async action2(params) {
+    // Implementation
+  }
+}
+
+module.exports = MyAgent;
+```
+
+**Step 2: Register in AgentManager**
+
+Edit `src/core/agentManager.js`, update `AGENT_REGISTRY`:
+
+```javascript
+const AGENT_REGISTRY = {
+  file:      "../agents/fileAgent",
+  web:       "../agents/webAgent",
+  git:       "../agents/gitAgent",
+  android:   "../agents/androidAgent",
+  infra:     "../agents/infrastructureAgent",
+  security:  "../agents/securityAgent",
+  qa:        "../agents/qaAgent",
+  assistant: "../agents/assistantAgent",
+  myagent:   "../agents/myAgent",  // Add here
+};
+```
+
+**Step 3: Integrate with Orchestrator (for AI auto-execution)**
+
+Edit `src/core/fullAiOrchestrator.js`, add to `SYSTEM_PROMPTS` if the agent should be auto-callable:
+
+```javascript
+const SYSTEM_PROMPTS = {
+  fullai: `
+    ...existing prompt...
+    
+    AVAILABLE AGENT COMMANDS:
+    - zerath myagent action1 [args]
+    - zerath myagent action2 [args]
+  `
+};
+```
+
+**Step 4: Test the Agent**
+
+```bash
+zerath myagent action1 param1
+```
+
+---
+
+### Connecting to the Orchestrator
+
+To enable auto-invocation from the AI reasoning engine:
+
+**In `src/core/orchestrator.js`:**
+
+```javascript
+// Import your agent
+const MyAgent = require("../agents/myAgent");
+
+// Add to agent registry for orchestrator
+const ORCHESTRATOR_AGENTS = {
+  file:      new FileAgent(),
+  web:       new WebAgent(),
+  myagent:   new MyAgent(),  // Add here
+};
+
+// In the step execution loop:
+async executeStep(step) {
+  if (step.action === "run_agent") {
+    const { agent_name, params } = step;
+    const agent = ORCHESTRATOR_AGENTS[agent_name];
+    if (!agent) throw new Error(`Unknown agent: ${agent_name}`);
+    return await agent.run(params);
+  }
+}
+```
+
+---
+
+### Extending the AI Reasoning
+
+To add new reasoning capabilities, modify `src/core/queryReasoner.js`:
+
+```javascript
+class QueryReasoner {
+  async decomposeQuery(query) {
+    // Analyze query, decide which agents to invoke
+    // Return array of execution steps
+
+    const steps = [];
+    
+    if (query.involves("file_creation")) {
+      steps.push({
+        agent: "file",
+        action: "create",
+        params: [...],
+      });
+    }
+    
+    if (query.involves("deployment")) {
+      steps.push({
+        agent: "infra",
+        action: "deploy",
+        params: [...],
+      });
+    }
+    
+    return steps;
+  }
+}
+```
+
+---
+
+## Configuration
+
+### API Keys
+
+```bash
+zerath keys add claude sk-ant-...
+zerath keys add gemini AIzaSy...
+zerath keys add openai sk-proj-...
+
+# List all keys
+zerath keys list
+
+# Remove key
+zerath keys remove claude
+```
+
+### Permissions
+
+```bash
+# Interactive permission setup
+zerath perms
+
+# Grant access to external directory
+zerath perms allow /sdcard/MyProject
+```
+
+### Environment Variables
+
+```bash
+# Debug mode
+export ZERATH_DEBUG=1
+
+# Custom AI model (for advanced scenarios)
+export ZERATH_MODEL=claude-3-sonnet
+
+# Disable self-healing
+export ZERATH_NO_SELF_HEAL=1
+
+# Custom workspace
+export ZERATH_WORKSPACE=/path/to/workspace
+```
+
+---
+
+## File Structure
+
+```
+zerathcode/
+├── bin/
+│   └── zerathcode.js              # CLI entry point
+├── src/
+│   ├── agents/                    # All agents (see agents/README.md)
+│   ├── core/                      # Orchestration & state (see core/README.md)
+│   ├── ui/                        # Terminal rendering (see ui/README.md)
+│   └── utils/                     # Utilities (see utils/README.md)
+├── android-app/                   # Android bridge (see android-app/README.md)
+├── test/                          # Test suites
+├── package.json                   # Dependencies
+└── install.sh                     # Setup script
+```
+
+---
+
+## Next Steps
+
+- Read agent documentation: [src/agents/README.md](src/agents/README.md)
+- Understand orchestration: [src/core/README.md](src/core/README.md)
+- Learn architecture details: [src/utils/README.md](src/utils/README.md), [src/ui/README.md](src/ui/README.md)
+- Set up Android bridge: [android-app/README.md](android-app/README.md)
 
 # 4. Add at least one API key
 zerath keys add gemini   AIzaSy-...
@@ -188,7 +502,7 @@ zerathcode/
     │   ├── agentManager.js    CLI dispatch — routes `zerath <agent>` commands
     │   ├── apiKeyManager.js   Multi-provider key storage + rotation
     │   ├── memoryManager.js   Per-project memory (history, files, notes)
-    │   ├── workspaceManager.js  ~/hex-workspace/ project index
+    │   ├── workspaceManager.js  ~/zerath-workspace/ project index
     │   ├── selfHealingAgent.js  Build error → AI fix → retry loop
     │   ├── sandboxManager.js    Path traversal protection
     │   ├── permissionManager.js ~/.zerathcode/grants.json
@@ -283,7 +597,7 @@ Per-project memory stored at `<project>/.zerathcode/memory.json`. Tracks:
 Also writes a human-readable `README.md` to the project root after each turn.
 
 #### `src/core/workspaceManager.js`
-Manages `~/hex-workspace/` — the single root for all projects. Uses a global index at `~/hex-workspace/.index.json`. Each project entry has: `name`, `slug`, `stack`, `description`, `createdAt`, `lastUsed`, `provider`.
+Manages `~/zerath-workspace/` — the single root for all projects. Uses a global index at `~/zerath-workspace/.index.json`. Each project entry has: `name`, `slug`, `stack`, `description`, `createdAt`, `lastUsed`, `provider`.
 
 #### `src/core/selfHealingAgent.js`
 When a `run_command` step fails, this agent:
@@ -295,7 +609,7 @@ When a `run_command` step fails, this agent:
 This is why you see `[SYSTEM] ✖ Exit 1 → [AI] 📋 Analysing error → [SYSTEM] ▶ retry` in the logs.
 
 #### `src/core/sandboxManager.js`
-Prevents path traversal. When an agent resolves a path, it ensures the result stays within `~/hex-workspace/` (or the current project dir). External paths require explicit permission from `PermissionManager`.
+Prevents path traversal. When an agent resolves a path, it ensures the result stays within `~/zerath-workspace/` (or the current project dir). External paths require explicit permission from `PermissionManager`.
 
 #### `src/core/permissionManager.js`
 Stores user-granted access to external directories in `~/.zerathcode/grants.json`. If an agent tries to access a path outside the sandbox, it prompts: "Allow access to /sdcard/...? [y/N]". The answer is remembered for the session.
@@ -808,7 +1122,7 @@ fix it, don't use vite, use plain html/css/js in a public/ folder with node serv
 ### Gradle build hangs forever
 ```bash
 # Kill it with Ctrl+C, then manually:
-cd ~/hex-workspace/<yourproject>
+cd ~/zerath-workspace/<yourproject>
 ./gradlew --stop
 ./gradlew assembleDebug --no-daemon
 ```
@@ -832,13 +1146,13 @@ npm install -g pm2
 
 ### Memory file corrupt
 ```bash
-rm ~/hex-workspace/<project>/.zerathcode/memory.json
+rm ~/zerath-workspace/<project>/.zerathcode/memory.json
 # Start fresh — history will be empty but files still exist
 ```
 
 ---
 
-## Architecture Diagram
+## Architecture Diagramhex
 
 ```
                             ┌──────────────────────────┐

@@ -1,8 +1,11 @@
 package com.localai.automation.document.ui
 
+import android.graphics.Color
 import android.os.Bundle
 import android.view.*
 import android.view.inputmethod.EditorInfo
+import android.widget.LinearLayout
+import androidx.core.graphics.toColorInt
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
@@ -12,9 +15,10 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import com.localai.automation.bridge.BridgeManager
 import com.localai.automation.databinding.FragmentDocumentChatBinding
 import com.localai.automation.databinding.ItemDocumentChatMessageBinding
+import com.localai.automation.document.data.DocumentEntity
+import com.localai.automation.document.data.RiskLevel
 import com.localai.automation.service.AgentRuntimeService
 import kotlinx.coroutines.launch
 
@@ -24,18 +28,11 @@ import kotlinx.coroutines.launch
  * Two-panel screen:
  *  1. Risk summary banner (from Stage 1 classifier)
  *  2. Chat interface for Q&A against the document
- *
- * Q&A flow:
- *   User types question
- *     → ViewModel retrieves top-k chunks via BM25
- *     → Context + question sent to AI via bridge
- *     → AI answers grounded in document text
- *     → Answer displayed in chat
  */
 class DocumentChatFragment : Fragment() {
 
     private var _binding: FragmentDocumentChatBinding? = null
-    private val binding  get() = _binding!!
+    private val binding get() = _binding!!
     private val viewModel: DocumentViewModel by viewModels()
     private lateinit var adapter: ChatMessageAdapter
 
@@ -60,8 +57,6 @@ class DocumentChatFragment : Fragment() {
         observeState()
     }
 
-    // ── Chat setup ────────────────────────────────────────────────────────────
-
     private fun setupChat() {
         adapter = ChatMessageAdapter()
         binding.recyclerChat.apply {
@@ -71,7 +66,10 @@ class DocumentChatFragment : Fragment() {
 
         binding.btnSend.setOnClickListener { sendQuestion() }
         binding.etQuestion.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEND) { sendQuestion(); true } else false
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                sendQuestion()
+                true
+            } else false
         }
     }
 
@@ -81,79 +79,61 @@ class DocumentChatFragment : Fragment() {
         binding.etQuestion.text?.clear()
 
         viewModel.askQuestion(question) { ragContext ->
-            // Send RAG context to AI via bridge
-            queryAiViabridge(ragContext, question)
+            queryAiViaBridge(ragContext, question)
         }
     }
 
-    /**
-     * Sends the document context and question to the AI via the WebSocket bridge.
-     * The Node.js fullAiOrchestrator handles the LLM call and returns the answer.
-     */
-    private suspend fun queryAiViabridge(ragContext: String, question: String): String? {
-        val bridge = AgentRuntimeService.bridgeManager ?: return null
+    private suspend fun queryAiViaBridge(ragContext: String, question: String): String? {
+        val bridge = AgentRuntimeService.bridgeManager ?: return "⚠ AI bridge service not available."
         if (!bridge.isConnected()) return "⚠ AI bridge not connected. Start ZerathCode in Termux."
 
         return try {
-            // Send document query over bridge
-            val result = bridge.bridge.send(
+            bridge.bridge.send(
                 com.localai.automation.bridge.BridgeMessage(
                     type = "document_query",
                     payload = mapOf(
-                        "question"   to question,
+                        "question" to question,
                         "ragContext" to ragContext,
                         "documentId" to documentId,
                     )
                 )
             )
-            // Response comes back async via message handler
-            // For now return placeholder; proper async handled via ViewModel
             null
         } catch (e: Exception) {
             "Error: ${e.message}"
         }
     }
 
-    // ── Risk banner ───────────────────────────────────────────────────────────
-
     private fun setupRiskBanner() {
         viewLifecycleOwner.lifecycleScope.launch {
-            val doc = viewModel.documents.value.find { it.id == documentId } ?: return@launch
-            updateRiskBanner(doc)
+            viewModel.documents.collect { docs ->
+                docs.find { it.id == documentId }?.let { updateRiskBanner(it) }
+            }
         }
 
-        // Deep analysis button
         binding.btnDeepAnalysis.setOnClickListener {
-            viewModel.runDeepRiskAnalysis(documentId) { prompt ->
-                // Send to AI via bridge for Stage 2 analysis
-                null // placeholder — bridge handler returns AI JSON
-            }
+            viewModel.runDeepRiskAnalysis(documentId) { _ -> null }
         }
     }
 
-    private fun updateRiskBanner(doc: com.localai.automation.document.data.DocumentEntity) {
-        val riskColor = when (doc.riskLevel) {
-            com.localai.automation.document.data.RiskLevel.SAFE     -> "#E8F5E9"
-            com.localai.automation.document.data.RiskLevel.LOW      -> "#F9FBE7"
-            com.localai.automation.document.data.RiskLevel.MEDIUM   -> "#FFF3E0"
-            com.localai.automation.document.data.RiskLevel.HIGH     -> "#FFEBEE"
-            com.localai.automation.document.data.RiskLevel.CRITICAL -> "#FCE4EC"
-            com.localai.automation.document.data.RiskLevel.UNKNOWN  -> "#F5F5F5"
+    private fun updateRiskBanner(doc: DocumentEntity) {
+        val riskColorHex = when (doc.riskLevel) {
+            RiskLevel.SAFE -> "#E8F5E9"
+            RiskLevel.LOW -> "#F9FBE7"
+            RiskLevel.MEDIUM -> "#FFF3E0"
+            RiskLevel.HIGH -> "#FFEBEE"
+            RiskLevel.CRITICAL -> "#FCE4EC"
+            RiskLevel.UNKNOWN -> "#F5F5F5"
         }
 
-        binding.cardRiskBanner.setCardBackgroundColor(
-            android.graphics.Color.parseColor(riskColor)
-        )
-        binding.tvRiskLevel.text  = "${viewModel.riskEmoji(doc.riskLevel)} ${doc.riskLevel.name}"
+        binding.cardRiskBanner.setCardBackgroundColor(riskColorHex.toColorInt())
+        binding.tvRiskLevel.text = "${viewModel.riskEmoji(doc.riskLevel)} ${doc.riskLevel.name}"
         binding.tvRiskSummary.text = doc.summary.ifBlank { "Risk assessment in progress…" }
     }
 
-    // ── Observe ───────────────────────────────────────────────────────────────
-
     private fun observeState() {
         viewLifecycleOwner.lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     viewModel.chatMessages.collect { messages ->
                         adapter.submitList(messages)
@@ -169,12 +149,6 @@ class DocumentChatFragment : Fragment() {
                         binding.btnSend.isEnabled = !answering
                     }
                 }
-
-                launch {
-                    viewModel.documents.collect { docs ->
-                        docs.find { it.id == documentId }?.let { updateRiskBanner(it) }
-                    }
-                }
             }
         }
     }
@@ -185,39 +159,40 @@ class DocumentChatFragment : Fragment() {
     }
 }
 
-// ── Chat message adapter ──────────────────────────────────────────────────────
-
 class ChatMessageAdapter : ListAdapter<DocumentViewModel.ChatMessage, ChatMessageAdapter.VH>(DIFF) {
 
     companion object {
         val DIFF = object : DiffUtil.ItemCallback<DocumentViewModel.ChatMessage>() {
             override fun areItemsTheSame(a: DocumentViewModel.ChatMessage, b: DocumentViewModel.ChatMessage) =
                 a.ts == b.ts && a.role == b.role
+
             override fun areContentsTheSame(a: DocumentViewModel.ChatMessage, b: DocumentViewModel.ChatMessage) =
                 a == b
         }
     }
 
-    inner class VH(val b: ItemDocumentChatMessageBinding) : RecyclerView.ViewHolder(b.root)
+    class VH(val b: ItemDocumentChatMessageBinding) : RecyclerView.ViewHolder(b.root)
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-        VH(ItemDocumentChatMessageBinding.inflate(
-            android.view.LayoutInflater.from(parent.context), parent, false
-        ))
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+        return VH(
+            ItemDocumentChatMessageBinding.inflate(
+                LayoutInflater.from(parent.context), parent, false
+            )
+        )
+    }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         val msg = getItem(position)
         holder.b.tvMessage.text = msg.content
-        holder.b.tvRole.text    = if (msg.role == "user") "You" else "AI"
+        holder.b.tvRole.text = if (msg.role == "user") "You" else "AI"
 
-        // Align user right, AI left
-        holder.b.root.gravity = if (msg.role == "user") {
-            android.view.Gravity.END
-        } else {
-            android.view.Gravity.START
+        val lp = holder.b.root.layoutParams as? LinearLayout.LayoutParams
+        if (lp != null) {
+            lp.gravity = if (msg.role == "user") Gravity.END else Gravity.START
+            holder.b.root.layoutParams = lp
         }
 
         val bgColor = if (msg.role == "user") "#E3F2FD" else "#F1F8E9"
-        holder.b.cardMessage.setCardBackgroundColor(android.graphics.Color.parseColor(bgColor))
+        holder.b.cardMessage.setCardBackgroundColor(bgColor.toColorInt())
     }
 }

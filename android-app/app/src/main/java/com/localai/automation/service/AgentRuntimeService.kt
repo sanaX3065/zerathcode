@@ -35,6 +35,9 @@ class AgentRuntimeService : LifecycleService() {
         @Volatile var isRunning = false
             private set
 
+        @Volatile var bridgeManager: BridgeManager? = null
+            private set
+
         fun startService(context: Context) {
             val i = Intent(context, AgentRuntimeService::class.java).apply { action = ACTION_START }
             context.startForegroundService(i)
@@ -55,7 +58,6 @@ class AgentRuntimeService : LifecycleService() {
     private lateinit var priorityEngine: PriorityEngine
     private lateinit var actionResolver: ActionResolver
     private lateinit var actionExecutor: ActionExecutor
-    private lateinit var bridgeManager:  BridgeManager
     private val pipeline = EventPipeline.get()
 
     override fun onCreate() {
@@ -66,6 +68,8 @@ class AgentRuntimeService : LifecycleService() {
         priorityEngine = PriorityEngine()
         actionResolver = ActionResolver()
         actionExecutor = ActionExecutor(applicationContext, repository)
+        
+        // Initialize the companion's bridgeManager
         bridgeManager  = BridgeManager(applicationContext, repository)
 
         StateTracker.init(applicationContext)
@@ -94,7 +98,7 @@ class AgentRuntimeService : LifecycleService() {
         startModuleSafe(AgentModule.NOTIFICATION){ notificationModule.start(applicationContext) }
         startModuleSafe(AgentModule.BATTERY)     { batteryModule.start(applicationContext) }
 
-        bridgeManager.start()
+        bridgeManager?.start()
         ObservabilityLogger.system("Bridge manager started — connecting to ws://localhost:8765")
 
         NotificationBridge.register(applicationContext)
@@ -109,7 +113,7 @@ class AgentRuntimeService : LifecycleService() {
         locationModule.stop()
         notificationModule.stop()
         batteryModule.stop()
-        bridgeManager.stop()
+        bridgeManager?.stop()
         NotificationBridge.unregister(applicationContext)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -160,7 +164,7 @@ class AgentRuntimeService : LifecycleService() {
         ObservabilityLogger.eventReceived(event)
 
         // Forward event to AI bridge for real-time AI awareness
-        bridgeManager.forwardEvent(event)
+        bridgeManager?.forwardEvent(event)
 
         // Persist event
         try { repository.insertEvent(event) } catch (e: Exception) {
@@ -259,7 +263,8 @@ class AgentRuntimeService : LifecycleService() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
-        bridgeManager.cleanup()
+        bridgeManager?.cleanup()
+        bridgeManager = null
         ObservabilityLogger.system("Service destroyed — watchdog will revive")
     }
 }

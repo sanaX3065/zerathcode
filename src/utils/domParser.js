@@ -289,7 +289,7 @@ class DomParser {
         return "";
       }
 
-      if (TAG === "h1" || tag === "h2" || tag === "h3") {
+      if (tag === "h1" || tag === "h2" || tag === "h3") {
         const text = DomParser._walkNodeStructured(node, depth + 1);
         return text ? `[HEADING${tag[1]}]${text}[/HEADING${tag[1]}]` : "";
       }

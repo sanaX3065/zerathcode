@@ -105,8 +105,19 @@ class ExecutionGuard(private val context: Context) {
                     "WRITE_SETTINGS permission not granted. Go to Permissions tab to enable."
                 } else null
             }
-            ActionType.SEND_NOTIFICATION -> null  // Uses POST_NOTIFICATIONS which is declared in manifest
-            ActionType.LOG_ONLY -> null
+            // Phase 2 actions - permissions handled inside specific action classes or assumed for now
+            ActionType.SEND_NOTIFICATION,
+            ActionType.LOG_ONLY,
+            ActionType.CREATE_CALENDAR_EVENT,
+            ActionType.DELETE_CALENDAR_EVENT,
+            ActionType.QUERY_CALENDAR,
+            ActionType.SET_ALARM,
+            ActionType.DISMISS_ALARM,
+            ActionType.SET_WIFI,
+            ActionType.SET_BLUETOOTH,
+            ActionType.SET_DND_MODE,
+            ActionType.LAUNCH_APP,
+            ActionType.SEND_SMS -> null
         }
     }
 
