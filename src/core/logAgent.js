@@ -1,413 +1,274 @@
 /**
  * src/core/logAgent.js
- * ZerathCode — Log Agent
+ * ZerathCode — Log Agent v4 (Dual-Process Aware)
  *
- * Watches dev server stdout/stderr in real time.
- * Detects errors, reads relevant source files, asks AI to fix,
- * applies the patch, and restarts the server — all independently
- * of the coding orchestrator so the user always sees output.
+ * Monitors BOTH frontend and backend subprocesses independently.
+ * Each has its own fix budget (3 attempts), debounce timer, and
+ * error buffer. Both share the same FileMutex from the Orchestrator.
  *
- * Key design:
- *   - Runs in its own process/scope, never blocks the REPL
- *   - Keeps a ring-buffer of the last 120 log lines
- *   - Debounces error detection (waits 1.5s of silence before acting)
- *   - Max 3 auto-fix attempts per session to avoid loops
- *   - Emits events: 'error_detected', 'fix_applied', 'fix_failed', 'log'
+ * Error → fix → restart flow is fully independent per process,
+ * so a backend crash doesn't interrupt a healthy frontend.
  */
 
 "use strict";
 
-const { spawn }      = require("child_process");
-const fs             = require("fs");
-const path           = require("path");
-const EventEmitter   = require("events");
-const renderer       = require("../ui/renderer");
-const { C }          = require("../ui/renderer");
+const { spawn }    = require("child_process");
+const fs           = require("fs");
+const path         = require("path");
+const EventEmitter = require("events");
+const renderer     = require("../ui/renderer");
+const { C }        = require("../ui/renderer");
 
-// Patterns that indicate a runtime error worth fixing
 const ERROR_PATTERNS = [
-  /Error:/i,
-  /TypeError:/i,
-  /ReferenceError:/i,
-  /SyntaxError:/i,
-  /Cannot find module/i,
-  /ENOENT/i,
-  /EADDRINUSE/i,
-  /UnhandledPromiseRejection/i,
-  /\bfailed\b/i,
-  /\bcrash(ed)?\b/i,
+  /error:/i, /typeerror/i, /referenceerror/i, /syntaxerror/i,
+  /cannot find module/i, /enoent/i, /unhandledpromiserejection/i,
+  /\bcrash(ed)?\b/i, /\bfailed\b/i, /identifier .* has already been declared/i,
 ];
-
-// Lines that are safe to ignore (not real errors)
 const IGNORE_PATTERNS = [
-  /deprecation warning/i,
-  /^\s*$/, // blank lines
-  /listening on/i,
-  /server (started|running)/i,
-  /connected/i,
-  /\[nodemon\]/i,
+  /^\s*$/, /deprecation warning/i, /^warn\b/i,
+  /listening on/i, /server (started|running)/i, /^>$/,
+  /npm warn/i, /looking for funding/i,
 ];
 
-const RING_SIZE     = 120;   // max lines to buffer
-const DEBOUNCE_MS   = 1500;  // wait for burst to settle before acting
-const MAX_FIX_TRIES = 3;     // stop auto-fixing after this many attempts
+const RING_SIZE     = 80;
+const DEBOUNCE_MS   = 2000;
+const MAX_FIX_TRIES = 3;
 
-class LogAgent extends EventEmitter {
-  /**
-   * @param {object} opts
-   * @param {string}   opts.workDir    - project directory
-   * @param {string}   opts.provider   - AI provider key
-   * @param {object}   opts.ai         - AiClient instance
-   * @param {object}   opts.memory     - MemoryManager instance
-   * @param {number}   [opts.port]     - dev server port
-   */
-  constructor(opts) {
+// ─────────────────────────────────────────────────────────────────────────────
+class ProcessWatcher extends EventEmitter {
+  constructor(name, processRef, mutex, workDir, ai, provider, memory) {
     super();
-    this.workDir   = opts.workDir;
-    this.provider  = opts.provider;
-    this.ai        = opts.ai;
-    this.memory    = opts.memory;
-    this.port      = opts.port || 3000;
+    this.name       = name;      // "frontend" | "backend"
+    this.proc       = processRef;  // SubProcess instance
+    this.mutex      = mutex;
+    this.workDir    = workDir;
+    this.ai         = ai;
+    this.provider   = provider;
+    this.memory     = memory;
 
-    this._proc       = null;    // child process of dev server
-    this._logBuffer  = [];      // ring buffer of { line, isErr, ts }
-    this._fixCount   = 0;
-    this._debounce   = null;
-    this._fixing     = false;
-    this._started    = false;
-    this._startCmd   = null;
-    this._startArgs  = [];
-    this._restarting = false;
+    this._buf      = [];   // { line, isErr, ts }
+    this._fixing   = false;
+    this._tries    = 0;
+    this._debounce = null;
   }
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  /** Called by DualProcessManager when a line arrives from the subprocess */
+  feed(line, isErr) {
+    if (this._buf.length >= RING_SIZE) this._buf.shift();
+    this._buf.push({ line, isErr, ts: Date.now() });
 
-  /**
-   * Start the dev server and begin watching its output.
-   * @param {string}   cmd   e.g. "node"
-   * @param {string[]} args  e.g. ["server.js"]
-   */
-  start(cmd, args = []) {
-    if (this._started) this.stop();
-    this._startCmd  = cmd;
-    this._startArgs = args;
-    this._fixCount  = 0;
-    this._launch(cmd, args);
-  }
+    if (IGNORE_PATTERNS.some(p => p.test(line))) return;
+    if (this._fixing) return;
+    if (this._tries >= MAX_FIX_TRIES) return;
 
-  stop() {
-    this._started = false;
-    this._killProc();
-    if (this._debounce) { clearTimeout(this._debounce); this._debounce = null; }
-  }
-
-  isRunning() {
-    return this._proc && !this._proc.killed;
-  }
-
-  getRecentLogs(n = 40) {
-    return this._logBuffer.slice(-n).map(e => e.line).join("\n");
-  }
-
-  // ── Launch / restart ───────────────────────────────────────────────────────
-
-  _launch(cmd, args) {
-    this._started = true;
-
-    const child = spawn(cmd, args, {
-      cwd:   this.workDir,
-      env:   { ...process.env, PORT: String(this.port), FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    this._proc = child;
-
-    let startLines = 0;
-
-    const onData = (chunk, isErr) => {
-      const text = chunk.toString();
-      const lines = text.split(/\r?\n/).filter(Boolean);
-
-      for (const line of lines) {
-        // Show first 8 lines of startup
-        if (startLines < 8) {
-          renderer.agentLog("infra", isErr ? "warn" : "ok", line.trim().slice(0, 100));
-          startLines++;
-        }
-
-        this._push(line, isErr);
-        this.emit("log", line, isErr);
-        this._scheduleErrorCheck(line, isErr);
-      }
-    };
-
-    child.stdout.on("data", d => onData(d, false));
-    child.stderr.on("data", d => onData(d, true));
-
-    child.on("close", (code) => {
-      if (!this._started) return;
-      if (!this._restarting) {
-        renderer.agentLog("infra", code === 0 ? "ok" : "warn",
-          `Dev server exited (code ${code}) — LogAgent watching for errors…`);
-      }
-    });
-
-    child.on("error", (err) => {
-      renderer.agentLog("infra", "error", `Failed to start server: ${err.message}`);
-    });
-  }
-
-  _killProc() {
-    if (this._proc) {
-      try { this._proc.kill("SIGTERM"); } catch {}
-      this._proc = null;
+    if (isErr || ERROR_PATTERNS.some(p => p.test(line))) {
+      this._schedule();
     }
   }
 
-  _restart() {
-    this._restarting = true;
-    renderer.agentLog("infra", "run", "Restarting dev server after fix…");
-    this._killProc();
-    setTimeout(() => {
-      this._restarting = false;
-      this._launch(this._startCmd, this._startArgs);
-    }, 800);
+  reset() {
+    this._tries  = 0;
+    this._fixing = false;
+    if (this._debounce) { clearTimeout(this._debounce); this._debounce = null; }
   }
 
-  // ── Ring buffer ────────────────────────────────────────────────────────────
-
-  _push(line, isErr) {
-    if (this._logBuffer.length >= RING_SIZE) this._logBuffer.shift();
-    this._logBuffer.push({ line, isErr, ts: Date.now() });
-  }
-
-  // ── Error detection ────────────────────────────────────────────────────────
-
-  _scheduleErrorCheck(line, isErr) {
-    if (!isErr && !ERROR_PATTERNS.some(p => p.test(line))) return;
-    if (IGNORE_PATTERNS.some(p => p.test(line))) return;
-    if (this._fixing) return;
-    if (this._fixCount >= MAX_FIX_TRIES) return;
-
-    // Debounce: wait for burst to settle
+  _schedule() {
     if (this._debounce) clearTimeout(this._debounce);
     this._debounce = setTimeout(() => {
       this._debounce = null;
-      this._onError();
+      this._fix();
     }, DEBOUNCE_MS);
   }
 
-  async _onError() {
-    if (this._fixing || this._fixCount >= MAX_FIX_TRIES) return;
+  async _fix() {
+    if (this._fixing || this._tries >= MAX_FIX_TRIES) return;
     this._fixing = true;
-    this._fixCount++;
+    this._tries++;
 
-    const errorLines = this._logBuffer
+    const errorLines = this._buf
       .filter(e => e.isErr || ERROR_PATTERNS.some(p => p.test(e.line)))
-      .slice(-20)
-      .map(e => e.line)
-      .join("\n");
+      .slice(-15).map(e => e.line).join("\n");
 
-    const context = this._logBuffer.slice(-40).map(e => e.line).join("\n");
+    const context = this._buf.slice(-30).map(e => e.line).join("\n");
 
     renderer.agentLog("system", "warn",
-      `[LogAgent] Error detected (attempt ${this._fixCount}/${MAX_FIX_TRIES}) — analysing…`);
+      `[LogAgent:${this.name}] Fix attempt ${this._tries}/${MAX_FIX_TRIES}`);
 
-    this.emit("error_detected", { errorLines, context });
+    this.emit("error_detected", { name: this.name, errorLines });
 
     try {
-      await this._requestFix(errorLines, context);
+      const changed = await this._requestFix(errorLines, context);
+      if (changed) {
+        renderer.agentLog("infra", "run",
+          `[LogAgent:${this.name}] Fix applied — restarting ${this.name}…`);
+        await this.proc.restart();
+        this.emit("fix_applied", this.name);
+      } else {
+        this.emit("fix_failed", { name: this.name, reason: "No actionable steps from AI" });
+      }
     } catch (err) {
-      renderer.agentLog("system", "error", `[LogAgent] Fix request failed: ${err.message}`);
-      this.emit("fix_failed", err.message);
+      renderer.agentLog("system", "error",
+        `[LogAgent:${this.name}] Fix cycle error: ${err.message}`);
+      this.emit("fix_failed", { name: this.name, reason: err.message });
     } finally {
       this._fixing = false;
     }
   }
 
-  // ── AI fix request ─────────────────────────────────────────────────────────
+  async _requestFix(errorLines, context) {
+    const fileCtx = this._gatherFiles(errorLines);
+    const isBackend = this.name === "backend";
 
-  async _requestFix(errorLines, fullContext) {
-    // Gather relevant source files to give AI full context
-    const fileContext = this._readProjectFiles(errorLines);
+    const prompt = `You are fixing a ${this.name} process crash in a Node.js/Vite project on Termux (Android ARM64).
 
-    const prompt = `You are a bug-fixer for a Node.js web app running in Termux on Android.
-The dev server crashed or threw an error. Fix it WITHOUT changing the app's features.
-
-ERROR OUTPUT (last 20 relevant lines):
+PROCESS: ${this.name}
+ERROR:
 \`\`\`
-${errorLines.slice(0, 1500)}
+${errorLines.slice(0, 1200)}
 \`\`\`
 
-FULL LOG CONTEXT (last 40 lines):
+CONTEXT (last 30 lines):
 \`\`\`
-${fullContext.slice(0, 1000)}
+${context.slice(0, 800)}
 \`\`\`
 
-PROJECT FILES:
-${fileContext}
+FILES:
+${fileCtx}
 
-TERMUX RULES:
-- Never use sqlite3 / better-sqlite3 / native addons — use sql.js or plain JSON files
-- Never use vite/parcel/webpack — use Express + vanilla JS only
-- Start command is always: node server.js (or node index.js)
-- Node version: 18+ on ARM64
+${isBackend ? `BACKEND RULES:
+- NO sqlite3/better-sqlite3 (no NDK) — use sql.js (pure WASM) or flat JSON
+- sql.js usage: const { Database } = require('sql.js'); initSqlJs().then(SQL => { const db = new SQL.Database(); ... })
+- Express must use CommonJS: const express = require('express'); — never duplicate declarations
+- Entry: node server.js on port process.env.PORT || 3001` : `FRONTEND RULES:
+- Uses Vite dev server — vite must be in devDependencies
+- React components in src/ with .jsx extension
+- API calls proxy to http://localhost:3001 via vite.config.js`}
 
-Respond with ONLY a valid JSON array of fix steps:
+CRITICAL: Respond ONLY with a JSON array. No prose outside [].
 [
-  { "action": "edit_file", "params": { "path": "server.js", "find": "exact text to find", "replace": "replacement text" } },
-  { "action": "create_file", "params": { "path": "newfile.js", "content": "full content" } },
-  { "action": "run_command", "params": { "cmd": "npm", "args": ["install", "missing-package"] } },
+  { "action": "edit_file", "params": { "path": "server.js", "find": "exact text", "replace": "fixed text" } },
+  { "action": "create_file", "params": { "path": "file.js", "content": "full content" } },
+  { "action": "run_command", "params": { "cmd": "npm", "args": ["install", "pkg"] } },
   { "action": "message", "params": { "text": "What was wrong and what was fixed" } }
 ]
-
-RULES:
-- Only fix the actual error shown — do not rewrite the whole app
-- Include a "message" step explaining the fix
-- Keep all existing functionality intact`;
+Make the MINIMUM change needed. Do not rewrite the entire file unless absolutely necessary.`;
 
     let raw;
     try {
-      raw = await this.ai.ask(this.provider, prompt, { maxTokens: 2048 });
+      raw = await this.ai.ask(this.provider, prompt, { maxTokens: 2000 });
     } catch (err) {
-      throw err;
+      throw new Error(`AI call failed: ${err.message}`);
     }
 
     const steps = this._parseSteps(raw);
-    if (!steps || steps.length === 0) {
-      renderer.agentLog("system", "warn", "[LogAgent] Could not parse fix from AI response");
-      this.emit("fix_failed", "Could not parse AI response");
-      return;
-    }
+    if (!steps?.length) return false;
 
-    let hasRestartableChange = false;
-    let fixDescription = "";
-
+    let changed = false;
     for (const step of steps) {
-      const result = await this._applyStep(step);
-      if (step.action === "message") fixDescription = step.params?.text || "";
-      if (["edit_file", "create_file", "run_command"].includes(step.action)) {
-        hasRestartableChange = true;
-      }
+      const ok = await this._applyStep(step);
+      if (ok) changed = true;
     }
-
-    if (fixDescription) {
-      renderer.agentLog("system", "ok",
-        `[LogAgent] Fix applied: ${fixDescription.slice(0, 120)}`);
-    }
-
-    this.emit("fix_applied", { steps, description: fixDescription });
-
-    if (this.memory) {
-      this.memory.logAction("logagent", "fix",
-        `Auto-fixed: ${fixDescription.slice(0, 80)}`);
-    }
-
-    // Restart server to apply the fix
-    if (hasRestartableChange) {
-      this._restart();
-    }
+    return changed;
   }
-
-  // ── Apply a fix step ───────────────────────────────────────────────────────
 
   async _applyStep(step) {
     const { action, params = {} } = step;
 
     if (action === "message") {
-      console.log(`\n  ${C.bcyan}[LogAgent Fix]${C.reset}  ${params.text || ""}\n`);
-      return;
+      console.log(`\n  ${C.bcyan}[LogAgent:${this.name}]${C.reset}  ${params.text || ""}\n`);
+      if (this.memory) this.memory.logAction(`logagent:${this.name}`, "fix",
+        (params.text || "").slice(0, 80));
+      return false;
     }
 
     if (action === "create_file") {
-      const fp = this._safeResolve(params.path);
-      if (!fp) return;
-      const dir = path.dirname(fp);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(fp, params.content || "", "utf8");
-      renderer.agentLog("file", "create",
-        `[LogAgent] ${path.relative(this.workDir, fp)}`);
-      return;
+      const fp = this._safe(params.path);
+      if (!fp) return false;
+      const release = await this.mutex.acquire(fp);
+      try {
+        const dir = path.dirname(fp);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(fp, params.content || "", "utf8");
+        renderer.agentLog("file", "create",
+          `[LogAgent:${this.name}] ${path.relative(this.workDir, fp)}`);
+        return true;
+      } finally { release(); }
     }
 
     if (action === "edit_file") {
-      const fp = this._safeResolve(params.path);
-      if (!fp || !fs.existsSync(fp)) return;
-      let content = fs.readFileSync(fp, "utf8");
-      if (params.find !== undefined && content.includes(params.find)) {
-        content = content.replace(params.find, params.replace ?? "");
-        fs.writeFileSync(fp, content, "utf8");
-        renderer.agentLog("file", "edit",
-          `[LogAgent] ${path.relative(this.workDir, fp)}`);
-      } else if (params.content !== undefined) {
-        fs.writeFileSync(fp, params.content, "utf8");
-        renderer.agentLog("file", "edit",
-          `[LogAgent] ${path.relative(this.workDir, fp)} (full rewrite)`);
-      }
-      return;
+      const fp = this._safe(params.path);
+      if (!fp || !fs.existsSync(fp)) return false;
+      const release = await this.mutex.acquire(fp);
+      try {
+        let content = fs.readFileSync(fp, "utf8");
+        if (params.find !== undefined && content.includes(params.find)) {
+          content = content.replace(params.find, params.replace ?? "");
+          fs.writeFileSync(fp, content, "utf8");
+          renderer.agentLog("file", "edit",
+            `[LogAgent:${this.name}] ${path.relative(this.workDir, fp)}`);
+          return true;
+        } else if (params.content !== undefined) {
+          fs.writeFileSync(fp, params.content, "utf8");
+          renderer.agentLog("file", "edit",
+            `[LogAgent:${this.name}] ${path.relative(this.workDir, fp)} (rewrite)`);
+          return true;
+        }
+        renderer.agentLog("file", "warn",
+          `[LogAgent:${this.name}] find text not found in ${params.path}`);
+        return false;
+      } finally { release(); }
     }
 
     if (action === "run_command") {
-      const safe = new Set(["npm", "pip", "pip3", "pkg", "yarn"]);
-      if (!safe.has(params.cmd)) return;
+      const SAFE = new Set(["npm", "pip", "pip3", "pkg", "yarn"]);
+      if (!SAFE.has(params.cmd)) return false;
       const args = Array.isArray(params.args) ? params.args : [];
       renderer.agentLog("system", "install",
-        `[LogAgent] ${params.cmd} ${args.join(" ")}`);
-      await new Promise((resolve) => {
-        const c = spawn(params.cmd, args, {
-          cwd: this.workDir,
-          stdio: "inherit",
-        });
+        `[LogAgent:${this.name}] ${params.cmd} ${args.join(" ")}`);
+      await new Promise(resolve => {
+        const c = spawn(params.cmd, args, { cwd: this.workDir, stdio: "inherit" });
         c.on("close", resolve);
         c.on("error", resolve);
       });
+      return true;
     }
+
+    return false;
   }
 
-  // ── Read project files for context ─────────────────────────────────────────
-
-  _readProjectFiles(errorText) {
-    const MAX_SIZE  = 400;  // chars per file
-    const MAX_FILES = 6;
-
-    // Extract filenames mentioned in the error
+  _gatherFiles(errorText) {
+    const MAX_PER = 500, MAX_FILES = 4;
     const mentioned = [];
-    const re = /([a-zA-Z0-9_\-./]+\.(js|ts|json|html|css))(?::\d+)?/g;
+    const re = /([a-zA-Z0-9_\-./]+\.(js|jsx|ts|json|html|css))(?::\d+)?/g;
     let m;
     while ((m = re.exec(errorText)) !== null) {
       const fp = path.resolve(this.workDir, m[1]);
       if (fs.existsSync(fp)) mentioned.push(fp);
     }
-
-    // Always include entry points
-    const defaults = ["package.json", "server.js", "index.js", "app.js", "db.js"]
-      .map(f => path.join(this.workDir, f));
-
-    const all  = [...new Set([...mentioned, ...defaults])];
-    const out  = [];
-
-    for (const fp of all) {
-      if (out.length >= MAX_FILES) break;
-      if (!fs.existsSync(fp)) continue;
+    const defaults = this.name === "backend"
+      ? ["server.js","index.js","package.json"]
+      : ["vite.config.js","src/App.jsx","src/main.jsx","package.json"];
+    for (const name of defaults) {
+      const fp = path.join(this.workDir, name);
+      if (fs.existsSync(fp)) mentioned.push(fp);
+    }
+    const seen = new Set(), out = [];
+    for (const fp of mentioned) {
+      if (seen.has(fp) || out.length >= MAX_FILES) continue;
+      seen.add(fp);
       try {
-        const content = fs.readFileSync(fp, "utf8").slice(0, MAX_SIZE);
-        const rel = path.relative(this.workDir, fp);
-        out.push(`--- ${rel} ---\n${content}`);
+        const content = fs.readFileSync(fp, "utf8").slice(0, MAX_PER);
+        out.push(`--- ${path.relative(this.workDir, fp)} ---\n${content}`);
       } catch {}
     }
-
     return out.join("\n\n") || "(no source files found)";
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
-  _safeResolve(rawPath) {
+  _safe(rawPath) {
     if (!rawPath) return null;
     const abs = rawPath.startsWith("/")
-      ? rawPath
-      : path.resolve(this.workDir, rawPath);
-    if (!abs.startsWith(this.workDir)) return null;
-    return abs;
+      ? rawPath : path.resolve(this.workDir, rawPath);
+    return abs.startsWith(this.workDir) ? abs : null;
   }
 
   _parseSteps(raw) {
@@ -415,15 +276,84 @@ RULES:
     let str = raw.trim();
     const fence = str.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fence) str = fence[1].trim();
-    const s = str.indexOf("[");
-    const e = str.lastIndexOf("]");
+    const s = str.indexOf("["), e = str.lastIndexOf("]");
     if (s === -1 || e === -1) return null;
     try {
-      const parsed = JSON.parse(str.slice(s, e + 1));
-      return Array.isArray(parsed)
-        ? parsed.filter(x => x && typeof x.action === "string")
-        : null;
+      const p = JSON.parse(str.slice(s, e + 1));
+      return Array.isArray(p) ? p.filter(x => x && typeof x.action === "string") : null;
     } catch { return null; }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LogAgent — owns two ProcessWatchers
+// ─────────────────────────────────────────────────────────────────────────────
+class LogAgent extends EventEmitter {
+  /**
+   * @param {object} opts
+   * @param {string}             opts.workDir
+   * @param {string}             opts.provider
+   * @param {AiClient}           opts.ai
+   * @param {MemoryManager}      opts.memory
+   * @param {FileMutex}          opts.mutex
+   * @param {DualProcessManager} opts.processManager
+   */
+  constructor(opts) {
+    super();
+    this.workDir = opts.workDir;
+
+    this._frontendWatcher = null;
+    this._backendWatcher  = null;
+
+    this._opts = opts;  // store for lazy creation
+  }
+
+  /**
+   * Create watcher for the frontend subprocess.
+   * Call this after DualProcessManager.frontend is ready.
+   */
+  attachFrontend(frontendSubProc) {
+    const w = new ProcessWatcher(
+      "frontend", frontendSubProc,
+      this._opts.mutex, this.workDir,
+      this._opts.ai, this._opts.provider, this._opts.memory
+    );
+    this._wire(w);
+    this._frontendWatcher = w;
+    // Wire onLine
+    frontendSubProc.onLine = (line, isErr) => w.feed(line, isErr);
+  }
+
+  attachBackend(backendSubProc) {
+    const w = new ProcessWatcher(
+      "backend", backendSubProc,
+      this._opts.mutex, this.workDir,
+      this._opts.ai, this._opts.provider, this._opts.memory
+    );
+    this._wire(w);
+    this._backendWatcher = w;
+    backendSubProc.onLine = (line, isErr) => w.feed(line, isErr);
+  }
+
+  resetFrontend() { this._frontendWatcher?.reset(); }
+  resetBackend()  { this._backendWatcher?.reset(); }
+
+  _wire(watcher) {
+    watcher.on("error_detected", ev => {
+      renderer.agentLog("system", "warn",
+        `[LogAgent:${ev.name}] Runtime error — starting auto-fix…`);
+      this.emit("error_detected", ev);
+    });
+    watcher.on("fix_applied", name => {
+      renderer.agentLog("system", "ok",
+        `[LogAgent:${name}] ✔ Fix applied & process restarted`);
+      this.emit("fix_applied", name);
+    });
+    watcher.on("fix_failed", ev => {
+      renderer.agentLog("system", "error",
+        `[LogAgent:${ev.name}] Auto-fix failed: ${ev.reason}`);
+      this.emit("fix_failed", ev);
+    });
   }
 }
 
