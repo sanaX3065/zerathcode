@@ -58,25 +58,50 @@ function stripAnsi(str) {
 class Renderer {
 
   // ── Banner ─────────────────────────────────────────────────────────────────
-banner() {
-  const w    = Math.min(termWidth(), 72);
-  const line = "═".repeat(w);
+  bannerPC() {
+    console.log(`
+    ${C.bmagenta}${C.bold}
+    ███████╗███████╗██████╗  █████╗ ████████╗██╗  ██╗ ██████╗ ██████╗ ███████╗
+    ╚══███╔╝██╔════╝██╔══██╗██╔══██╗╚══██╔══╝██║  ██║██╔════╝██╔═══██╗██╔════╝
+      ███╔╝ █████╗  ██████╔╝███████║   ██║   ███████║██║     ██║   ██║███████╗
+    ███╔╝  ██╔══╝  ██╔══██╗██╔══██║   ██║   ██╔══██║██║     ██║   ██║╚════██║
+    ███████╗███████╗██║  ██║██║  ██║   ██║   ██║  ██║╚██████╗╚██████╔╝███████║
+    ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
+    ${C.reset}
 
-  console.log(`\n${C.bmagenta}${line}${C.reset}`);
+    ${C.grey}        Z E R A T H C O D E  •  v1.0${C.reset}
+    ${C.grey}     Multi-Agent AI Dev System • Termux${C.reset}
+    `);
+  }
 
-  // Clean ZERATHCODE Banner
-  console.log(`${C.bmagenta}${C.bold}███████╗███████╗██████╗  █████╗ ████████╗██╗  ██╗ ██████╗ ██████╗ ███████╗${C.reset}`);
-  console.log(`${C.bmagenta}${C.bold}╚══███╔╝██╔════╝██╔══██╗██╔══██╗╚══██╔══╝██║  ██║██╔════╝██╔═══██╗██╔════╝${C.reset}`);
-  console.log(`${C.byellow}${C.bold}  ███╔╝ █████╗  ██████╔╝███████║   ██║   ███████║██║     ██║   ██║███████╗${C.reset}`);
-  console.log(`${C.byellow}${C.bold} ███╔╝  ██╔══╝  ██╔══██╗██╔══██║   ██║   ██╔══██║██║     ██║   ██║╚════██║${C.reset}`);
-  console.log(`${C.bmagenta}${C.bold}███████╗███████╗██║  ██║██║  ██║   ██║   ██║  ██║╚██████╗╚██████╔╝███████║${C.reset}`);
-  console.log(`${C.bmagenta}${C.bold}╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝${C.reset}`);
+  // ── Mobile Banner ─────────────────────────
+  bannerMobile() {
+    console.log(`
+    ${C.bmagenta}${C.bold}
+    ███████╗██████╗  █████╗
+    ╚══███╔╝██╔══██╗██╔══██╗
+      ███╔╝ ██████╔╝███████║
+    ███╔╝  ██╔══██╗██╔══██║
+    ███████╗██║  ██║██║  ██║
+    ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+    ${C.reset}
 
-  console.log(`${C.grey}  v1.0  •  Multi-Agent AI Dev System  •  Termux${C.reset}`);
+    ${C.byellow}${C.bold}Z E R A T H C O D E${C.reset}
+    ${C.grey}Multi-Agent AI Dev System${C.reset}
+    ${C.grey}v1.0 • Termux${C.reset}
+    `);
+  }
 
-  console.log(`${C.bmagenta}${line}${C.reset}\n`);
-}
+  // ── Main Banner Switch ────────────────────
+  banner() {
+    const w = termWidth();
 
+    if (w >= 70) {
+        this.bannerPC();       // ✅ use this.
+    } else {
+        this.bannerMobile();   // ✅ use this.
+    }
+  }
   // ── Section header ─────────────────────────────────────────────────────────
   section(title) {
     const w    = Math.min(termWidth(), 72);
