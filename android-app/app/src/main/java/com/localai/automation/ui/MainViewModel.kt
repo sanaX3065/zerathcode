@@ -8,6 +8,7 @@ import com.localai.automation.data.entities.*
 import com.localai.automation.data.repository.LocalRepository
 import com.localai.automation.engine.CommandParser
 import com.localai.automation.models.*
+import com.localai.automation.proactive.ProactiveSuggestionEntity
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -24,6 +25,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val actions       = repository.getRecentActions().stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     val chatMessages  = repository.getAllChatMessages().stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     val failedActions = repository.getFailedActions().stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    // ─── Proactive state ──────────────────────────────────────────────────────
+    val pendingSuggestions: StateFlow<List<ProactiveSuggestionEntity>> = repository.getPendingSuggestions()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    suspend fun triggerProactiveAnalysis(): Int {
+        // This is typically handled by the ProactiveEngine owned by the Service.
+        // We return 0 here as a placeholder if not directly triggering from VM.
+        return 0
+    }
+
+    suspend fun acceptSuggestion(suggestionId: String): Boolean {
+        return repository.acceptSuggestion(suggestionId)
+    }
+
+    suspend fun dismissSuggestion(suggestionId: String) {
+        repository.dismissSuggestion(suggestionId)
+    }
 
     // ─── Chat: parse only (no side effects) ──────────────────────────────────
 

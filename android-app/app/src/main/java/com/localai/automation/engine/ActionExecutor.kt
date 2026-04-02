@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.localai.automation.LocalAIApp
 import com.localai.automation.R
+import com.localai.automation.actions.*
 import com.localai.automation.data.repository.LocalRepository
 import com.localai.automation.models.*
 
@@ -33,6 +34,12 @@ class ActionExecutor(
     companion object { private const val TAG = "ActionExecutor" }
 
     private val guard = ExecutionGuard(context)
+
+    // Phase 2 Action Handlers
+    private val calendarAction = CalendarAction(context)
+    private val alarmAction    = AlarmAction(context)
+    private val connectivity   = ConnectivityAction(context)
+    private val appAction      = AppAction(context)
 
     /**
      * @param action The action to execute.
@@ -64,18 +71,41 @@ class ActionExecutor(
         val actionId = repository.insertAction(action, triggerReason)
 
         return try {
-            val result = when (action.actionType) {
-                ActionType.SET_SILENT_MODE   -> executeSilentMode(actionId, action)
-                ActionType.SET_VIBRATION     -> executeVibration(actionId, action)
-                ActionType.SET_BRIGHTNESS    -> executeBrightness(actionId, action)
-                ActionType.SEND_NOTIFICATION -> executeNotification(actionId, action, triggerReason)
-                ActionType.LOG_ONLY          -> executeLogOnly(actionId, action)
+            val res: ActionResult = when (action.actionType) {
+                // Phase 1
+                ActionType.SET_SILENT_MODE   -> wrapLegacy(executeSilentMode(actionId, action))
+                ActionType.SET_VIBRATION     -> wrapLegacy(executeVibration(actionId, action))
+                ActionType.SET_BRIGHTNESS    -> wrapLegacy(executeBrightness(actionId, action))
+                ActionType.SEND_NOTIFICATION -> wrapLegacy(executeNotification(actionId, action, triggerReason))
+                ActionType.LOG_ONLY          -> wrapLegacy(executeLogOnly(actionId, action))
+
+                // Phase 2 - Calendar
+                ActionType.CREATE_CALENDAR_EVENT -> calendarAction.createEvent(action)
+                ActionType.DELETE_CALENDAR_EVENT -> calendarAction.deleteEvent(action)
+                ActionType.QUERY_CALENDAR        -> calendarAction.queryEvents(action)
+
+                // Phase 2 - Alarms
+                ActionType.SET_ALARM     -> alarmAction.setAlarm(action)
+                ActionType.DISMISS_ALARM -> alarmAction.dismissAlarm(action)
+
+                // Phase 2 - Connectivity
+                ActionType.SET_WIFI      -> connectivity.setWifi(action)
+                ActionType.SET_BLUETOOTH -> connectivity.setBluetooth(action)
+                ActionType.SET_DND_MODE  -> connectivity.setDndMode(action)
+
+                // Phase 2 - Apps & SMS
+                ActionType.LAUNCH_APP -> appAction.launchApp(action)
+                ActionType.SEND_SMS   -> appAction.sendSms(action)
             }
 
-            if (result.success) guard.commit(action)
+            // Convert ActionResult to ExecutionResult and update DB
+            val execResult = ExecutionResult(actionId, res.success, res.message)
+            repository.updateActionResult(actionId, if (res.success) "SUCCESS" else "FAILED", res.message)
 
-            ObservabilityLogger.actionExecuted(action, result.success, result.message)
-            result
+            if (execResult.success) guard.commit(action)
+
+            ObservabilityLogger.actionExecuted(action, execResult.success, execResult.message)
+            execResult
         } catch (e: Exception) {
             Log.e(TAG, "Execution failed for ${action.actionType}", e)
             repository.updateActionResult(actionId, "FAILED", e.message)
@@ -84,10 +114,14 @@ class ActionExecutor(
         }
     }
 
+    private fun wrapLegacy(legacy: ExecutionResult): ActionResult {
+        return if (legacy.success) ActionResult.success(legacy.message)
+        else ActionResult.failure(legacy.message)
+    }
+
     private suspend fun executeSilentMode(id: Long, action: AgentAction): ExecutionResult {
         val nm = context.getSystemService(NotificationManager::class.java)
         if (!nm.isNotificationPolicyAccessGranted) {
-            repository.updateActionResult(id, "PERMISSION_DENIED", "DND policy not granted")
             return ExecutionResult(id, false, "DND policy access not granted")
         }
         val modeStr = action.getStringParam("mode")?.uppercase() ?: "SILENT"
@@ -97,7 +131,6 @@ class ActionExecutor(
             "VIBRATE" -> AudioManager.RINGER_MODE_VIBRATE
             else      -> AudioManager.RINGER_MODE_NORMAL
         }
-        repository.updateActionResult(id, "SUCCESS")
         return ExecutionResult(id, true, "Ringer set to $modeStr")
     }
 
@@ -106,13 +139,11 @@ class ActionExecutor(
         val audio = context.getSystemService(AudioManager::class.java)
         audio.ringerMode = if (level == 0) AudioManager.RINGER_MODE_SILENT
                            else AudioManager.RINGER_MODE_VIBRATE
-        repository.updateActionResult(id, "SUCCESS")
         return ExecutionResult(id, true, "Vibration level=$level applied")
     }
 
     private suspend fun executeBrightness(id: Long, action: AgentAction): ExecutionResult {
         if (!Settings.System.canWrite(context)) {
-            repository.updateActionResult(id, "PERMISSION_DENIED", "WRITE_SETTINGS not granted")
             return ExecutionResult(id, false, "WRITE_SETTINGS not granted")
         }
         val auto = action.getBoolParam("auto") ?: false
@@ -127,7 +158,6 @@ class ActionExecutor(
             Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, level)
         }
         val msg = "Brightness set to ${if (auto) "auto" else action.getIntParam("level")}"
-        repository.updateActionResult(id, "SUCCESS")
         return ExecutionResult(id, true, msg)
     }
 
@@ -151,14 +181,12 @@ class ActionExecutor(
             .setAutoCancel(true)
             .build()
         nm.notify(System.currentTimeMillis().toInt(), notif)
-        repository.updateActionResult(id, "SUCCESS")
         return ExecutionResult(id, true, "Notification sent: $title")
     }
 
     private suspend fun executeLogOnly(id: Long, action: AgentAction): ExecutionResult {
         val msg = action.getStringParam("message") ?: "Rule triggered"
         Log.i(TAG, "LOG_ONLY: $msg")
-        repository.updateActionResult(id, "SUCCESS")
         return ExecutionResult(id, true, msg)
     }
 }

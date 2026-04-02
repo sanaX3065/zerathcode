@@ -3,12 +3,12 @@
  * ZerathCode — Workspace Manager
  * Author: sanaX3065
  *
- * Owns ~/hex-workspace/ — the single root for ALL projects.
+ * Owns ~/zerath-workspace/ — the single root for ALL projects.
  * Every fullstack / mobile project lives in its own sandboxed folder here.
  *
- * Global index: ~/hex-workspace/.index.json
- * Per-project:  ~/hex-workspace/<name>/.zerathcode/memory.json
- *               ~/hex-workspace/<name>/README.md
+ * Global index: ~/zerath-workspace/.index.json
+ * Per-project:  ~/zerath-workspace/<name>/.zerathcode/memory.json
+ *               ~/zerath-workspace/<name>/README.md
  */
 
 "use strict";
@@ -17,7 +17,7 @@ const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
 
-const WORKSPACE_ROOT  = path.join(os.homedir(), "hex-workspace");
+const WORKSPACE_ROOT  = path.join(os.homedir(), "zerath-workspace");
 const WORKSPACE_INDEX = path.join(WORKSPACE_ROOT, ".index.json");
 
 class WorkspaceManager {
@@ -30,7 +30,7 @@ class WorkspaceManager {
 
   // ── Create a new project dir ──────────────────────────────────────────────
   /**
-   * Creates ~/hex-workspace/<name>/ and registers it in the index.
+   * Creates ~/zerath-workspace/<name>/ and registers it in the index.
    * @param {string} name  - Project folder name (slugified)
    * @param {object} meta  - { type, stack, description, provider }
    * @returns {string}     - Absolute project path

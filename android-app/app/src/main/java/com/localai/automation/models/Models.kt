@@ -58,6 +58,7 @@ data class AgentAction(
     fun getParam(key: String): Any? = params[key]
     fun getStringParam(key: String): String? = params[key]?.toString()
     fun getIntParam(key: String): Int? = (params[key] as? Double)?.toInt() ?: params[key] as? Int
+    fun getLongParam(key: String): Long? = (params[key] as? Double)?.toLong() ?: params[key] as? Long
     fun getBoolParam(key: String): Boolean? = params[key] as? Boolean
 }
 

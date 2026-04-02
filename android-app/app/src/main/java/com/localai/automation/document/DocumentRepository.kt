@@ -10,6 +10,7 @@ import com.localai.automation.document.processor.DocumentChunker
 import com.localai.automation.document.processor.DocumentProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
@@ -185,16 +186,10 @@ class DocumentRepository(
     suspend fun queryAllDocuments(query: String): List<QueryResult> =
         withContext(Dispatchers.IO) {
             val allDocs = documentDao.getAllDocuments()
-            // Collect current snapshot (can't use Flow directly in suspend fun easily)
             val results = mutableListOf<QueryResult>()
-            // We collect once synchronously using a Channel
-            val snapshot = mutableListOf<DocumentEntity>()
-            val job = kotlinx.coroutines.GlobalScope.kotlinx.coroutines.async(Dispatchers.IO) {
-                allDocs.collect { snapshot.addAll(it) }
-            }
-            // Small delay to get the first emission
-            kotlinx.coroutines.delay(100)
-            job.cancel()
+            
+            // Collect the first emission (current snapshot) from the Flow
+            val snapshot = allDocs.first()
 
             for (doc in snapshot.filter { it.isProcessed }) {
                 results.add(queryDocument(doc.id, query))

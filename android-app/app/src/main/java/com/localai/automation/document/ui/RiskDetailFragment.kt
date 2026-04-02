@@ -6,6 +6,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.localai.automation.databinding.FragmentRiskDetailBinding
@@ -50,7 +51,6 @@ class RiskDetailFragment : Fragment() {
     private fun loadRiskDetail(documentId: Long) {
         viewLifecycleOwner.lifecycleScope.launch {
             val doc = viewModel.documents.first().find { it.id == documentId } ?: return@launch
-            val ctx = requireContext()
 
             // ── Header ────────────────────────────────────────────────────────
             binding.tvDocumentName.text = doc.name
@@ -87,7 +87,7 @@ class RiskDetailFragment : Fragment() {
                 binding.btnDeepAnalysis.isEnabled = false
                 binding.progressDeep.visibility = View.VISIBLE
 
-                viewModel.runDeepRiskAnalysis(documentId) { prompt ->
+                viewModel.runDeepRiskAnalysis(documentId) { _ ->
                     null // wired via bridge in DocumentChatFragment pattern
                 }
             }
@@ -249,12 +249,13 @@ class RiskFlagAdapter(
     private val flags: List<DocumentRiskClassifier.RiskFlag>
 ) : RecyclerView.Adapter<RiskFlagAdapter.VH>() {
 
-    inner class VH(val b: ItemRiskFlagBinding) : RecyclerView.ViewHolder(b.root)
+    class VH(val b: ItemRiskFlagBinding) : RecyclerView.ViewHolder(b.root)
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-        VH(ItemRiskFlagBinding.inflate(
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+        return VH(ItemRiskFlagBinding.inflate(
             android.view.LayoutInflater.from(parent.context), parent, false
         ))
+    }
 
     override fun getItemCount() = flags.size
 

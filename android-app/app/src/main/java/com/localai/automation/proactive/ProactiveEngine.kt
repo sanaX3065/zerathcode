@@ -8,7 +8,6 @@ import com.localai.automation.bridge.BridgeMessage
 import com.localai.automation.data.repository.LocalRepository
 import com.localai.automation.engine.StateTracker
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
 /**
@@ -123,11 +122,11 @@ class ProactiveEngine(
                         bridgeManager.bridge.onMessageReceived = original
 
                         val suggestions = parseSuggestions(msg.payload)
-                        cont.resume(suggestions)
+                        cont.resume(suggestions) { /* No-op cleanup */ }
                     } else if (msg.id == msgId && msg.type == "error") {
                         bridgeManager.bridge.onMessageReceived = original
                         Log.w(TAG, "Proactive error: ${msg.payload["message"]}")
-                        cont.resume(emptyList())
+                        cont.resume(emptyList()) { /* No-op cleanup */ }
                     } else {
                         original?.invoke(msg)
                     }
@@ -138,7 +137,7 @@ class ProactiveEngine(
                 )
                 if (!sent) {
                     bridgeManager.bridge.onMessageReceived = original
-                    cont.resume(emptyList())
+                    cont.resume(emptyList()) { /* No-op cleanup */ }
                 }
 
                 cont.invokeOnCancellation {

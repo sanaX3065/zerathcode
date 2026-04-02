@@ -5,14 +5,14 @@
  *
  * Three tiers of memory:
  *
- *  1. PROJECT MEMORY  — ~/.hex-workspace/<project>/.zerathcode/memory.json
+ *  1. PROJECT MEMORY  — ~/.zerath-workspace/<project>/.zerathcode/memory.json
  *     Rich, persistent, portable across Claude/Gemini/GPT.
  *     Records: files, deps, run commands, conversation, tech decisions, errors.
  *
  *  2. CHAT MEMORY     — in-process only (ephemeral, deleted on exit)
  *     Only current conversation turns. Nothing written to disk.
  *
- *  3. GLOBAL INDEX    — ~/hex-workspace/.index.json
+ *  3. GLOBAL INDEX    — ~/zerath-workspace/.index.json
  *     Managed by WorkspaceManager. MemoryManager reads it for context.
  *
  * The memory.json schema is designed to be readable by ANY LLM

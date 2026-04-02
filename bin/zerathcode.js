@@ -14,7 +14,7 @@
 const args    = process.argv.slice(2);
 const command = args[0];
 
-// ── Route: run → interactive REPL (HexOverlord workflow) ─────────────────────
+// ── Route: run → interactive REPL (Zerathcode workflow) ─────────────────────
 if (!command || command === "run") {
   const Repl = require("../src/core/repl");
   const repl = new Repl();

@@ -13,7 +13,7 @@ const ApiKeyManager     = require("./apiKeyManager");
 
 // ── Agent Registry ─────────────────────────────────────────────────────────────
 const AGENT_REGISTRY = {
-  // ── HexOverlord agents ──
+  // ── Zerathcode agents ──
   file:      "../agents/fileAgent",
   web:       "../agents/webAgent",
   git:       "../agents/gitAgent",
@@ -131,7 +131,7 @@ class AgentManager {
     console.log(`\n\x1b[36m── ZerathCode Config ────────────────────────────────\x1b[0m`);
     console.log(`  \x1b[90mHome:       \x1b[0m${os.homedir()}`);
     console.log(`  \x1b[90mConfig dir: \x1b[0m${require("path").join(os.homedir(), ".zerathcode")}`);
-    console.log(`  \x1b[90mWorkspace:  \x1b[0m${require("path").join(os.homedir(), "hex-workspace")}`);
+    console.log(`  \x1b[90mWorkspace:  \x1b[0m${require("path").join(os.homedir(), "zerath-workspace")}`);
     console.log(`  \x1b[90mNode:       \x1b[0m${process.version}`);
     console.log(`  \x1b[90mPlatform:   \x1b[0m${process.platform} (${process.arch})`);
     console.log(`  \x1b[90mDebug mode: \x1b[0m${process.env.ZERATH_DEBUG ? "ON" : "OFF"}`);
