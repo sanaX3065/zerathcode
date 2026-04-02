@@ -297,6 +297,35 @@ class DualProcessManager {
   }
 
   /**
+   * Run npm install synchronously and return success
+   */
+  async runNpmInstall() {
+    return new Promise((resolve) => {
+      const npm = spawn("npm", ["install"], {
+        cwd: this.workDir,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      
+      npm.stdout?.on("data", (d) => {
+        const text = d.toString();
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          if (text.includes("found 0 vulnerabilities") || text.includes("added")) {
+            require("../ui/renderer").agentLog("infra", "ok", `[npm] ${line.slice(0,100)}`);
+          }
+        }
+      });
+      
+      npm.on("close", (code) => {
+        resolve(code === 0);
+      });
+      npm.on("error", () => {
+        resolve(false);
+      });
+    });
+  }
+
+  /**
    * Read last N lines from a log file (for status reports).
    * @param {"frontend"|"backend"} which
    * @param {number} n

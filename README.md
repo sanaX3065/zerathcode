@@ -1,4 +1,11 @@
 # ZerathCode v1.0
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Termux](https://img.shields.io/badge/Platform-Termux-black.svg?logo=android)](#)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-blue.svg)](#)
+
+> **ZerathCode is an experimental, multi-agent AI development system built to run natively on Android via Termux.** > It orchestrates LLMs (Gemini, Claude, GPT) to build, test, and deploy applications entirely on your mobile device, featuring an auto-healing execution loop to handle the unique quirks of the Termux environment.
+
 **Multi-Agent AI Development System for Termux / Android**
 
 ---
@@ -1099,6 +1106,16 @@ ZERATH_DEBUG=1 zerath run
 ```
 
 ---
+## 🚧 Roadmap & Known Issues (Help Wanted!)
+
+ZerathCode is actively in development. Because compiling native modules on Android/Termux is notoriously difficult, you might hit some edge cases. 
+
+**Current Priorities:**
+- [ ] **Native Addon Stability:** Improving the self-healing agent's ability to handle C++ dependency failures (like `sqlite3` falling back to `better-sqlite3`).
+- [ ] **REPL Loop Refinement:** Ensuring variable scoping doesn't duplicate during intense auto-healing cycles.
+- [ ] **Broader Android Integration:** Expanding the `Termux:API` capabilities within the Assistant Agent.
+
+If you are a Termux power user and want to help stabilize the native execution loops, PRs are highly welcome!
 
 ## Troubleshooting
 
@@ -1152,7 +1169,7 @@ rm ~/zerath-workspace/<project>/.zerathcode/memory.json
 
 ---
 
-## Architecture Diagramhex
+## Architecture Diagram
 
 ```
                             ┌──────────────────────────┐
@@ -1266,4 +1283,9 @@ The healer's AI prompt must include the exact error output, the current file con
 
 ---
 
-*ZerathCode v1.0 — Built by sanaX3065*
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+*ZerathCode — Built for the Termux community by sanaX3065*

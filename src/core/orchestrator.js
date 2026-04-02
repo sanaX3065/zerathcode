@@ -239,22 +239,79 @@ class Orchestrator {
     await this.procMgr.stopAll();
   }
 
-  // Compatibility shim (repl.js calls this)
-  _ensureRunScript() {
+  // Create run.sh script by asking AI
+  async _ensureRunScript() {
     const runSh = path.join(this.workDir, "run.sh");
-    if (fs.existsSync(runSh)) return;
-    const entry = ["server.js","index.js","app.js"]
-      .find(f => fs.existsSync(path.join(this.workDir, f)));
-    const cmds = this.memory?.getProject?.()?.runCommands?.[0]
-      || (entry ? `node ${entry}` : "npm start");
+    
+    // If run.sh already exists, use it
+    if (fs.existsSync(runSh)) {
+      renderer.agentLog("infra", "ok", `✓ run.sh found — ready to execute`);
+      return;
+    }
+
+    renderer.agentLog("infra", "info", "Generating run.sh script…");
+
     try {
-      fs.writeFileSync(runSh, [
-        "#!/data/data/com.termux/files/usr/bin/bash",
+      // Ask AI to generate the run script
+      const prompt = `You are the ZerathCode Shell Script Generator.
+
+The project at ${this.workDir} has been set up with:
+- Frontend: ${this._phases.frontend.length > 0 ? "Yes" : "No"}
+- Backend: ${this._phases.backend.length > 0 ? "Yes" : "No"}
+- Frontend port: ${this._frontendPort}
+- Backend port: ${this._backendPort}
+
+Generate ONLY a bash shell script (nothing else) that starts the project:
+- For fullstack: start both frontend and backend as background processes
+- For frontend-only: start frontend dev server
+- For backend-only: start backend server
+- Include error handling and logging to frontend.log and backend.log
+
+The script should be production-ready for Termux/Android.
+
+Start with: #!/bin/bash
+
+DO NOT include any markdown, backticks, or explanation. Just the raw bash script.`;
+
+      const raw = await this.ai.ask(this.provider, prompt, { maxTokens: 800 });
+      
+      // Extract just the bash script (remove markdown if present)
+      let scriptContent = raw.trim();
+      const fence = scriptContent.match(/```(?:bash)?\s*([\s\S]*?)```/);
+      if (fence) {
+        scriptContent = fence[1].trim();
+      }
+      
+      // Ensure it starts with shebang
+      if (!scriptContent.startsWith("#!")) {
+        scriptContent = "#!/bin/bash\n" + scriptContent;
+      }
+
+      // Save script
+      fs.writeFileSync(runSh, scriptContent + "\n", { encoding: "utf8", mode: 0o755 });
+      
+      renderer.agentLog("infra", "create", `✓ run.sh created (${scriptContent.split("\n").length} lines)`);
+      this.memory.logAction("file", "create", "run.sh");
+      
+      // Show first few lines
+      const preview = scriptContent.split("\n").slice(0, 3).join("\n");
+      console.log(`\n  ${C.bgreen}run.sh${C.reset}\n  ${C.grey}${preview}...\n`);
+      
+    } catch (err) {
+      renderer.agentLog("infra", "warn", `Could not generate run.sh: ${err.message}`);
+      
+      // Fallback: create basic script
+      const fallback = [
+        "#!/bin/bash",
         'cd "$(dirname "$0")"',
-        "echo 'Starting...'",
-        cmds,
-      ].join("\n") + "\n", { mode: 0o755 });
-    } catch {}
+        "echo '🚀 Starting ZerathCode project...'",
+        this._phases.backend.length > 0 ? "npm start 2>&1 | tee project.log &" : "npm run dev 2>&1 | tee project.log",
+        "echo '✓ Project started'",
+      ].join("\n") + "\n";
+      
+      fs.writeFileSync(runSh, fallback, { encoding: "utf8", mode: 0o755 });
+      renderer.agentLog("infra", "ok", `✓ Fallback run.sh created`);
+    }
   }
 
   // ── Main process turn ──────────────────────────────────────────────────────
@@ -294,11 +351,26 @@ class Orchestrator {
         return;
       }
 
-      const steps = this._parseSteps(raw);
+      // Parse and validate AI response
+      const parseResult = this._parseSteps(raw);
+      const steps = parseResult.steps;
+      
       if (!steps?.length) {
-        renderer.aiMessage(raw.slice(0, 3000), this.provider);
+        if (parseResult.error) {
+          renderer.errorBox(`JSON PARSE ERROR`, 
+            `Failed to parse AI response: ${parseResult.error}\n\nAI Response (first 500 chars):\n${raw.slice(0, 500)}`);
+          renderer.agentLog("ai", "error", `Invalid JSON: ${parseResult.error}`);
+        } else {
+          renderer.aiMessage(raw.slice(0, 3000), this.provider);
+        }
         this.memory.addAssistantMessage(raw.slice(0, 500));
         return;
+      }
+      
+      if (parseResult.warnings?.length) {
+        for (const warn of parseResult.warnings) {
+          renderer.agentLog("ai", "warn", warn);
+        }
       }
 
       // Auto-web-fetch for chat
@@ -353,15 +425,36 @@ class Orchestrator {
       if (!hasToolCall && !gotAnswer) break;
     }
 
-    // Final starts if phases didn't trigger automatically
+    // Phase transitions after files created (fullstack mode)
     if (this.mode === "fullstack" && this._filesCreated > 0) {
-      await this._checkPhaseTransitions(true);
+      renderer.agentLog("infra", "info", "Phase transition: Finalizing frontend and backend setup…");
+      
+      // Try to install dependencies and start frontend
+      const hasPkg = fs.existsSync(path.join(this.workDir, "package.json"));
+      if (hasPkg && !this._frontendDone) {
+        renderer.agentLog("infra", "run", "🔧 Installing dependencies…");
+        const installOk = await this.procMgr.runNpmInstall();
+        if (installOk) {
+          renderer.agentLog("infra", "ok", "✓ npm install completed");
+        } else {
+          renderer.agentLog("infra", "warn", "npm install had issues but continuing…");
+        }
+        
+        // Start frontend after deps installed
+        await this._startFrontend();
+      }
+      
+      // Then start backend if frontend completed
+      if (this._frontendDone && !this._backendDone &&
+          fs.existsSync(path.join(this.workDir, "server.js"))) {
+        await this._startBackend();
+      }
     }
 
     if (this.mode !== "chat" && this.mode !== "fullai") {
       try { this.memory.writeReadme(); } catch {}
     }
-    this._ensureRunScript();
+    await this._ensureRunScript();
 
     if (summary.trim()) this.memory.addAssistantMessage(summary.trim());
   }
@@ -440,6 +533,35 @@ class Orchestrator {
     await this._statusReport("backend", this._backendPort);
   }
 
+  // ── AI confirmation after each phase ───────────────────────────────────────
+  async _confirmPhaseCompletion(phase, action) {
+    renderer.agentLog("ai", "info", `Confirming ${phase} completion…`);
+    
+    try {
+      const prompt = `You are the ZerathCode confirmation agent.
+
+The developer has just ${action}.
+
+Respond with ONLY this exact JSON array format:
+[
+  { "action": "message", "params": { "text": "✅ ${phase.toUpperCase()} SETUP COMPLETE\\n\\nWhat was changed:\\n- [list the files and changes made]\\n\\nFiles created: [list file names]\\n\\nNext: [what happens next]" } }
+]`;
+
+      const raw = await this.ai.ask(this.provider, prompt, { maxTokens: 300 });
+      const parseResult = this._parseSteps(raw);
+      
+      if (parseResult.steps?.length) {
+        for (const s of parseResult.steps) {
+          if (s.action === "message") {
+            renderer.aiMessage(s.params?.text || "", this.provider);
+          }
+        }
+      }
+    } catch (err) {
+      renderer.agentLog("system", "warn", `Phase confirmation skipped: ${err.message}`);
+    }
+  }
+
   // ── AI status report after phase start ────────────────────────────────────
   async _statusReport(phase, port) {
     const logLines = this.procMgr.readLog(phase, 20);
@@ -455,9 +577,21 @@ class Orchestrator {
         { maxTokens: 400 }
       );
 
-      const steps = this._parseSteps(raw);
-      if (steps?.length) {
-        for (const s of steps) {
+      const parseResult = this._parseSteps(raw);
+      
+      if (parseResult.error) {
+        renderer.agentLog("ai", "warn", `Status report JSON error: ${parseResult.error}`);
+        // Still print basic info
+        console.log(
+          `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
+          `${C.bcyan}  ║  ${C.white}PHASE STATUS: ${phase.toUpperCase().padEnd(39)}${C.bcyan}║${C.reset}\n` +
+          `${C.bcyan}  ╠${"═".repeat(54)}╣${C.reset}\n` +
+          `${C.bcyan}  ║  ✔ ${phase.toUpperCase()} RUNNING at http://localhost:${port}${C.reset}\n` +
+          `${C.bcyan}  ║  Logs: ${path.basename(phase)}.log${C.reset}\n` +
+          `${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`
+        );
+      } else if (parseResult.steps?.length) {
+        for (const s of parseResult.steps) {
           if (s.action === "message") {
             // Print as a distinct status block
             const text = s.params?.text || "";
@@ -470,12 +604,22 @@ class Orchestrator {
               console.log(`${C.bcyan}  ║  ${C.reset}${line.slice(0,52).padEnd(52)}${C.bcyan}  ║${C.reset}`);
             }
             console.log(`${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`);
+            this.memory.addNote(`${phase} status: ${text.split("\n")[0]}`);
           }
         }
       }
     } catch (err) {
       renderer.agentLog("system", "warn",
         `Status report skipped: ${err.message}`);
+      // Still print basic info
+      console.log(
+        `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
+        `${C.bcyan}  ║  ${C.white}PHASE STATUS: ${phase.toUpperCase().padEnd(39)}${C.bcyan}║${C.reset}\n` +
+        `${C.bcyan}  ╠${"═".repeat(54)}╣${C.reset}\n` +
+        `${C.bcyan}  ║  ✔ ${phase.toUpperCase()} RUNNING at http://localhost:${port}${C.reset}\n` +
+        `${C.bcyan}  ║  Check logs: ${phase}.log${C.reset}\n` +
+        `${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`
+      );
     }
   }
 
@@ -856,16 +1000,54 @@ class Orchestrator {
   }
 
   _parseSteps(raw) {
-    if (!raw || typeof raw !== "string") return null;
+    if (!raw || typeof raw !== "string") {
+      return { steps: null, error: "AI response was empty or not a string", warnings: [] };
+    }
+    
     let str = raw.trim();
+    
+    // Try to extract JSON from markdown code fence
     const fence = str.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence) str = fence[1].trim();
+    if (fence) {
+      str = fence[1].trim();
+    }
+    
+    // Find JSON array boundaries
     const s = str.indexOf("["), e = str.lastIndexOf("]");
-    if (s === -1 || e === -1 || e <= s) return null;
+    if (s === -1 || e === -1 || e <= s) {
+      return { 
+        steps: null, 
+        error: "No JSON array found in response", 
+        warnings: [`Raw response start: "${raw.slice(0, 100)}..."`]
+      };
+    }
+    
     try {
-      const p = JSON.parse(str.slice(s, e + 1));
-      return Array.isArray(p) ? p.filter(x => x && typeof x.action === "string") : null;
-    } catch { return null; }
+      const jsonStr = str.slice(s, e + 1);
+      const p = JSON.parse(jsonStr);
+      
+      if (!Array.isArray(p)) {
+        return {
+          steps: null,
+          error: `Expected JSON array, got ${typeof p}`,
+          warnings: []
+        };
+      }
+      
+      const validSteps = p.filter(x => x && typeof x.action === "string");
+      const invalidCount = p.length - validSteps.length;
+      const warnings = invalidCount > 0 
+        ? [`Filtered ${invalidCount} invalid step(s) from response`]
+        : [];
+      
+      return { steps: validSteps, error: null, warnings };
+    } catch (err) {
+      return {
+        steps: null,
+        error: `JSON parse failed: ${err.message}`,
+        warnings: [`At position ${s}-${e}: "${str.slice(Math.max(0,s-20), Math.min(str.length, e+20))}..."`]
+      };
+    }
   }
 
   _resolvePath(rawPath) {
