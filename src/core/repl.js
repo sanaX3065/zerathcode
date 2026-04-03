@@ -412,6 +412,32 @@ class Repl {
         break;
       }
 
+      case "/debug": {
+        console.log(`\n${C.bcyan}  DEBUG INFO${C.reset}\n`);
+        console.log(`  ${C.yellow}Memory State${C.reset}`);
+        console.log(`    projectDir:     ${this.memory.projectDir || C.grey + "NOT SET" + C.reset}`);
+        console.log(`    memoryFilePath: ${this.memory.memoryFilePath || "N/A"}`);
+        const files = this.memory.getFiles();
+        console.log(`    tracked files:  ${Object.keys(files).length}`);
+        console.log(`    completed:      ${(this.memory.getCompletedFiles() || []).length}`);
+        
+        console.log(`\n  ${C.yellow}Orchestrator State${C.reset}`);
+        console.log(`    workDir:        ${this.orchestrator?.workDir || C.grey + "NOT SET" + C.reset}`);
+        console.log(`    filesCreated:   ${this.orchestrator?._filesCreated || 0}`);
+        
+        console.log(`\n  ${C.yellow}File Details${C.reset}`);
+        if (Object.keys(files).length === 0) {
+          console.log(`    ${C.grey}(no files in memory)${C.reset}`);
+        } else {
+          Object.entries(files).forEach(([path, info]) => {
+            console.log(`    ${path}`);
+            console.log(`      language: ${info.language}, lines: ${info.linesOfCode}, created: ${info.created?.slice(0, 19)}`);
+          });
+        }
+        console.log("");
+        break;
+      }
+
       case "/clear":
         console.clear();
         renderer.modeBadge(this.mode, this.provider);
@@ -545,6 +571,7 @@ class Repl {
       `\n${C.grey}  ┌─ Commands ────────────────────────────────────┐${C.reset}\n` +
       `${C.grey}  │  /memory    Project memory snapshot            │${C.reset}\n` +
       `${C.grey}  │  /files     Tracked files                      │${C.reset}\n` +
+      `${C.grey}  │  /debug     Memory & file tracking state       │${C.reset}\n` +
       `${C.grey}  │  /projects  All projects                       │${C.reset}\n` +
       `${C.grey}  │  /history   Conversation history               │${C.reset}\n` +
       `${C.grey}  │  /readme    Write README.md to project dir     │${C.reset}\n` +

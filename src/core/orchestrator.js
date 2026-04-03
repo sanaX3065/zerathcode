@@ -743,7 +743,10 @@ Respond with ONLY this exact JSON array format:
 
       case "create_file": {
         const fp = this._resolvePath(params.path);
-        if (!fp) return null;
+        if (!fp) {
+          renderer.agentLog("file", "error", `Invalid path: ${params.path}`);
+          return null;
+        }
         const rel = path.relative(this.workDir, fp);
 
         if (fs.existsSync(fp) && this.memory.isFileComplete(fp)) {
@@ -756,7 +759,15 @@ Respond with ONLY this exact JSON array format:
           const dir = path.dirname(fp);
           if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
           const content = params.content || "";
+          
+          // Write file and verify
           fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
+          
+          // Verify file was actually written
+          if (!fs.existsSync(fp)) {
+            renderer.agentLog("file", "error", `${rel}  ${C.grey}FILE WRITE FAILED (not found on disk)${C.reset}`);
+            return null;
+          }
 
           const ext  = path.extname(fp).slice(1).toLowerCase();
           const lang = { js:"JS",jsx:"JSX",ts:"TS",tsx:"TSX",
@@ -766,7 +777,15 @@ Respond with ONLY this exact JSON array format:
           renderer.agentLog("file", "create",
             `${rel}  ${C.grey}(${lang}, ${content.split("\n").length}L)${C.reset}`);
           this.memory.logAction("file", "create", rel);
-          this.memory.registerFile(fp, `${lang} — ${path.basename(fp)}`, lang);
+          
+          // Register file with detailed error handling
+          if (!this.memory.projectDir) {
+            renderer.agentLog("file", "error", `${rel}  ${C.grey}TRACKING FAILED (memory.projectDir not set)${C.reset}`);
+          } else {
+            this.memory.registerFile(fp, `${lang} — ${path.basename(fp)}`, lang);
+            renderer.agentLog("memory", "ok", `${rel}  registered in memory`);
+          }
+          
           this.memory.markFileComplete(fp);
           this._filesCreated++;
           this.fileCtx.invalidate();
