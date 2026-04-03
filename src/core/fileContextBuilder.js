@@ -4,15 +4,6 @@
  *
  * Scans the project directory and builds a rich file context block
  * that gets injected into every AI prompt.
- *
- * This solves: "agent doesn't know what files already exist"
- *
- * Features:
- *   - Lists all project files with sizes
- *   - Reads content of small/relevant files automatically
- *   - Smart relevance scoring (prioritises files mentioned in user query)
- *   - Hard size caps so we never blow the context window
- *   - Works with zero new npm dependencies
  */
 
 "use strict";
@@ -20,7 +11,6 @@
 const fs   = require("fs");
 const path = require("path");
 
-// Extensions we care about
 const CODE_EXTS = new Set([
   ".js", ".ts", ".mjs", ".cjs",
   ".html", ".css", ".json",
@@ -28,7 +18,6 @@ const CODE_EXTS = new Set([
   ".sh", ".md", ".txt", ".env.example",
 ]);
 
-// Paths/dirs to always skip
 const SKIP_DIRS = new Set([
   "node_modules", ".git", "build", "dist", ".gradle", ".idea",
   "coverage", ".zerathcode", "__pycache__", ".cache",
@@ -38,14 +27,23 @@ const SKIP_FILES = new Set([
   ".DS_Store", "package-lock.json", "yarn.lock",
 ]);
 
-const MAX_FILE_READ_BYTES  = 3000;  // per file content
-const MAX_TOTAL_BYTES      = 8000;  // total context budget
+const MAX_FILE_READ_BYTES  = 3000;
+const MAX_TOTAL_BYTES      = 8000;
 const MAX_FILES_LISTED     = 40;
 const ALWAYS_READ_FILES    = ["package.json", "server.js", "index.js", "app.js", ".env.example"];
 
 class FileContextBuilder {
   constructor(workDir) {
     this.workDir = workDir;
+    this._dirty  = true;   // tracks whether a rebuild is needed
+  }
+
+  /**
+   * Invalidate the scan cache so the next build() re-scans the directory.
+   * Called by the orchestrator after any file is created or edited.
+   */
+  invalidate() {
+    this._dirty = true;
   }
 
   /**
@@ -70,7 +68,6 @@ class FileContextBuilder {
 
     const lines = ["=== EXISTING PROJECT FILES ==="];
 
-    // File tree
     lines.push("\nFiles:");
     for (const f of topFiles) {
       const sizeStr = f.size < 1024
@@ -84,11 +81,9 @@ class FileContextBuilder {
       return lines.join("\n");
     }
 
-    // Content of relevant/small files
     lines.push("\nFile Contents (relevant files):");
     let bytesUsed = lines.join("\n").length;
 
-    // Always read entry points first
     const alwaysRead = topFiles.filter(f =>
       ALWAYS_READ_FILES.includes(path.basename(f.rel))
     );
@@ -100,7 +95,7 @@ class FileContextBuilder {
     for (const f of ordered) {
       if (bytesUsed >= maxBytes) break;
       if (!CODE_EXTS.has(f.ext)) continue;
-      if (f.size > MAX_FILE_READ_BYTES * 3) continue; // skip huge files
+      if (f.size > MAX_FILE_READ_BYTES * 3) continue;
 
       try {
         const content = fs.readFileSync(f.abs, "utf8")
@@ -116,11 +111,12 @@ class FileContextBuilder {
     }
 
     lines.push("\n=== END FILES ===");
+    this._dirty = false;
     return lines.join("\n");
   }
 
   /**
-   * Read a specific file's content (for "read_file" step or targeted context).
+   * Read a specific file's content.
    * @param {string} relPath
    * @param {number} maxBytes
    */
@@ -135,7 +131,6 @@ class FileContextBuilder {
 
   /**
    * Find files matching a pattern (name substring or extension).
-   * Returns array of { rel, abs, size }
    */
   find(pattern) {
     const files = this._scan();
@@ -148,7 +143,6 @@ class FileContextBuilder {
 
   /**
    * Search file contents for a text pattern.
-   * Returns array of { rel, line, lineNo, content }
    */
   grep(pattern) {
     const files = this._scan();
@@ -159,7 +153,7 @@ class FileContextBuilder {
 
     for (const f of files) {
       if (!CODE_EXTS.has(f.ext)) continue;
-      if (f.size > 50000) continue; // skip very large files
+      if (f.size > 50000) continue;
       try {
         const lines = fs.readFileSync(f.abs, "utf8").split("\n");
         lines.forEach((line, i) => {
@@ -172,7 +166,7 @@ class FileContextBuilder {
     return results;
   }
 
-  // ── Internal ────────────────────────────────────────────────────────────────
+  // ── Internal ─────────────────────────────────────────────────────────────
 
   _scan() {
     const files = [];
@@ -204,18 +198,12 @@ class FileContextBuilder {
 
   _score(files, queryTokens) {
     if (queryTokens.length === 0) {
-      // No query — sort by importance heuristic
-      return files.sort((a, b) => {
-        const ia = this._importanceScore(a);
-        const ib = this._importanceScore(b);
-        return ib - ia;
-      });
+      return files.sort((a, b) => this._importanceScore(b) - this._importanceScore(a));
     }
 
     return files
       .map(f => {
         let score = this._importanceScore(f);
-        // Boost if filename matches query tokens
         for (const tok of queryTokens) {
           if (f.rel.toLowerCase().includes(tok)) score += 3;
         }
@@ -228,15 +216,14 @@ class FileContextBuilder {
     const name = f.name.toLowerCase();
     const ext  = f.ext;
 
-    // Entry points get highest priority
     if (["server.js","index.js","app.js","package.json"].includes(name)) return 10;
     if (name === ".env.example") return 8;
     if (name.includes("route") || name.includes("api")) return 7;
     if (name.includes("db") || name.includes("database")) return 6;
     if (ext === ".html" && f.rel.startsWith("public")) return 5;
-    if (ext === ".js") return 4;
+    if (ext === ".js" || ext === ".jsx") return 4;
     if (ext === ".css") return 3;
-    if (f.size < 500) return 2; // small files are cheap to include
+    if (f.size < 500) return 2;
     return 1;
   }
 

@@ -1,39 +1,6 @@
 /**
  * src/core/orchestrator.js
  * ZerathCode v4 — Full Stack Orchestrator
- *
- * Key changes from v3:
- *
- *  PHASE-AWARE EXECUTION
- *    The AI's plan step now includes a "phase" field:
- *      "phase": "frontend" | "backend" | "both"
- *    Execution flow:
- *      1. All frontend files created (parallel batches)
- *      2. npm install
- *      3. Frontend subprocess STARTED → logs to frontend.log
- *      4. AI STATUS REPORT: "Frontend ready at :5173. Starting backend…"
- *      5. All backend files created
- *      6. Backend subprocess STARTED → logs to backend.log
- *      7. AI STATUS REPORT: "Backend ready at :3001. Full stack running."
- *
- *  FILE MUTEX
- *    Same promise-chain FileMutex as v3.
- *    Shared with LogAgent — both agents serialize writes per file.
- *
- *  DUAL PROCESS MANAGER
- *    DualProcessManager owns frontend (port 5173) and backend (port 3001).
- *    Both have independent port-clearing restart (fuser/proc/lsof chain).
- *    LogAgent is attached after each subprocess starts.
- *
- *  RAG CONTEXT
- *    FileContextBuilder BM25 — same as v3.
- *    Index invalidated on every write.
- *
- *  STATUS REPORTS
- *    After each phase completes, the Orchestrator asks the AI:
- *    "The {phase} is running. Read the last 20 lines of {phase}.log
- *     and confirm what was built and that it's working."
- *    The AI's response is printed as a cyan status block.
  */
 
 "use strict";
@@ -60,7 +27,7 @@ const PREVIEW_LINES  = 20;
 const PARALLEL_BATCH = 4;
 
 // ═════════════════════════════════════════════════════════════════════════════
-// FILE MUTEX (same zero-dep implementation as v3)
+// FILE MUTEX
 // ═════════════════════════════════════════════════════════════════════════════
 class FileMutex {
   constructor() { this._chains = new Map(); }
@@ -93,13 +60,20 @@ AVAILABLE ACTIONS: message, create_file, read_file, search_files, web_fetch`,
 ⚠️  CRITICAL: OUTPUT ONLY A SINGLE VALID JSON ARRAY.
 - No text before [ or after ]
 - NO markdown code blocks (no triple backticks)
-- NO literal newlines inside JSON strings
+- NO literal newlines inside JSON strings — use \\n instead
 - Escape all newlines as \\n in string values
-- Use straight double quotes, not fancy quotes  
+- Use straight double quotes only
 - Every string property must use \\n for line breaks, never actual newlines
 
-JSON Rules - Valid: { "text": "Line 1\\nLine 2" }
-JSON Rules - Invalid: { "text": "Line 1 [newline] Line 2" }
+MANDATORY STEP FORMAT — use EXACTLY this structure, always nested under "params":
+  { "action": "create_file", "params": { "path": "src/App.jsx", "content": "line1\\nline2" } }
+  { "action": "edit_file",   "params": { "path": "server.js", "find": "old text", "replace": "new text" } }
+  { "action": "run_command", "params": { "cmd": "npm", "args": ["install"] } }
+  { "action": "message",     "params": { "text": "Summary of what was done" } }
+  { "action": "memory_note", "params": { "note": "Key fact to remember" } }
+  { "action": "plan",        "params": { "steps": ["1. ...", "2. ..."], "phases": [...] } }
+
+DO NOT put "path" or "content" directly on the step object — always nest them inside "params".
 
 STACK RULES (Termux ARM64 — STRICT):
   Frontend : React + Vite OR vanilla HTML+CSS+JS. NEVER server-side rendered.
@@ -115,7 +89,6 @@ PHASE-SPLIT EXECUTION (REQUIRED):
     phase "frontend" → all React/HTML/CSS/JS/vite files
     phase "backend"  → server.js, db files, API routes
   After frontend phase runs, the frontend dev server starts BEFORE backend is built.
-  This means the user sees the UI immediately.
 
 PLAN STEP FORMAT (required):
   { "action": "plan", "params": {
@@ -145,16 +118,18 @@ ALWAYS end with memory_note.
 
 AVAILABLE ACTIONS: plan, message, create_file, edit_file, append_file,
   delete_file, read_file, search_files, run_command, web_fetch, memory_note,
-  ask_user, deploy_app, start_tunnel, security_scan`,
+  ask_user, deploy_app, start_tunnel, security_scan
+
+FINAL REMINDER: Your ENTIRE response must be a valid JSON array starting with [ and ending with ].
+No text outside the array. Always use "params" object — never put path/content directly on the step.`,
 
   mobiledev: `You are ZerathCode Mobile Dev Agent.
 
 ⚠️  OUTPUT ONLY VALID JSON ARRAY. NO MARKDOWN, NO BACKTICKS. ⚠️️
 - Start with [ and end with ]
 - NO literal newlines in strings (use \\n instead)
-- NO fancy quotes (use only "straight quotes")
+- Always nest fields inside "params": { "path": "...", "content": "..." }
 
-Check [PROJECT FILES] first. Use search_files before editing.
 AVAILABLE ACTIONS: plan, message, create_file, edit_file, search_files, read_file,
   run_command, memory_note, ask_user, security_scan`,
 
@@ -163,7 +138,7 @@ AVAILABLE ACTIONS: plan, message, create_file, edit_file, search_files, read_fil
 ⚠️  OUTPUT ONLY VALID JSON ARRAY. NO MARKDOWN, NO BACKTICKS. ⚠️️
 - Start with [ and end with ]
 - NO literal newlines in strings (use \\n instead)
-- NO fancy quotes (use only "straight quotes")
+- Always nest fields inside "params"
 
 AVAILABLE ACTIONS: plan, message, create_file, run_command, deploy_app, start_tunnel, memory_note`,
 
@@ -172,7 +147,6 @@ AVAILABLE ACTIONS: plan, message, create_file, run_command, deploy_app, start_tu
 
 // ═════════════════════════════════════════════════════════════════════════════
 // STATUS REPORT PROMPT
-// Asked to AI after each phase completes
 // ═════════════════════════════════════════════════════════════════════════════
 function statusPrompt(phase, logLines, port, projectName) {
   return `You are the ZerathCode status reporter.
@@ -185,7 +159,7 @@ ${logLines}
 
 Report in exactly this format (JSON array with ONE message action):
 [
-  { "action": "message", "params": { "text": "✅ ${phase.toUpperCase()} READY\\n\\nWhat was built:\\n- [list key files/features]\\n\\nRunning at: http://localhost:${port}\\n\\nStatus: [HEALTHY / HAS WARNINGS / describe any issues]\\n\\nNext: [what happens next, e.g. building backend]" } }
+  { "action": "message", "params": { "text": "✅ ${phase.toUpperCase()} READY\\n\\nWhat was built:\\n- [list key files/features]\\n\\nRunning at: http://localhost:${port}\\n\\nStatus: [HEALTHY / HAS WARNINGS / describe any issues]\\n\\nNext: [what happens next]" } }
 ]
 Keep it short (under 100 words). Be specific about what files were created.`;
 }
@@ -209,13 +183,9 @@ class Orchestrator {
       provider: this.provider, workDir: this.workDir,
     });
 
-    // Mandate 1: shared mutex
     this.mutex = new FileMutex();
-
-    // Mandate 3: RAG context
     this.fileCtx = new FileContextBuilder(this.workDir);
 
-    // Mandate 2: dual process manager + log agent
     this.procMgr = new DualProcessManager({
       workDir:      this.workDir,
       frontendPort: 5173,
@@ -231,7 +201,6 @@ class Orchestrator {
       processManager: this.procMgr,
     });
 
-    // Wire LogAgent events
     this.logAgent.on("error_detected", ev =>
       renderer.agentLog("system", "warn",
         `[LogAgent:${ev.name}] Error detected — auto-fix starting…`));
@@ -243,14 +212,13 @@ class Orchestrator {
         `[LogAgent:${ev.name}] Auto-fix exhausted — manual fix needed`));
 
     this._filesCreated = 0;
-    this._phases       = { frontend: [], backend: [] };  // files per phase
-    this._currentPhase = null;   // "frontend" | "backend" | null
+    this._phases       = { frontend: [], backend: [] };
+    this._currentPhase = null;
     this._frontendDone = false;
     this._backendDone  = false;
 
-    // Detected ports from plan step
-    this._frontendPort = 5173;
-    this._backendPort  = 3001;
+    this._frontendPort  = 5173;
+    this._backendPort   = 3001;
     this._frontendEntry = null;
     this._backendEntry  = null;
   }
@@ -260,79 +228,60 @@ class Orchestrator {
     await this.procMgr.stopAll();
   }
 
-  // Create run.sh script by asking AI
+  // ── Generate run.sh programmatically based on what files actually exist ───
   async _ensureRunScript() {
     const runSh = path.join(this.workDir, "run.sh");
-    
-    // If run.sh already exists, use it
+
     if (fs.existsSync(runSh)) {
-      renderer.agentLog("infra", "ok", `✓ run.sh found — ready to execute`);
+      renderer.agentLog("infra", "ok", `✓ run.sh found`);
       return;
     }
 
-    renderer.agentLog("infra", "info", "Generating run.sh script…");
+    const hasPackageJson = fs.existsSync(path.join(this.workDir, "package.json"));
+    const backendEntry   = ["server.js", "index.js", "app.js"]
+      .find(f => fs.existsSync(path.join(this.workDir, f)));
+    const hasFrontend    = ["src/App.jsx", "src/main.jsx", "index.html", "vite.config.js"]
+      .some(f => fs.existsSync(path.join(this.workDir, f)));
 
-    try {
-      // Ask AI to generate the run script
-      const prompt = `You are the ZerathCode Shell Script Generator.
-
-The project at ${this.workDir} has been set up with:
-- Frontend: ${this._phases.frontend.length > 0 ? "Yes" : "No"}
-- Backend: ${this._phases.backend.length > 0 ? "Yes" : "No"}
-- Frontend port: ${this._frontendPort}
-- Backend port: ${this._backendPort}
-
-Generate ONLY a bash shell script (nothing else) that starts the project:
-- For fullstack: start both frontend and backend as background processes
-- For frontend-only: start frontend dev server
-- For backend-only: start backend server
-- Include error handling and logging to frontend.log and backend.log
-
-The script should be production-ready for Termux/Android.
-
-Start with: #!/bin/bash
-
-DO NOT include any markdown, backticks, or explanation. Just the raw bash script.`;
-
-      const raw = await this.ai.ask(this.provider, prompt, { maxTokens: 800 });
-      
-      // Extract just the bash script (remove markdown if present)
-      let scriptContent = raw.trim();
-      const fence = scriptContent.match(/```(?:bash)?\s*([\s\S]*?)```/);
-      if (fence) {
-        scriptContent = fence[1].trim();
-      }
-      
-      // Ensure it starts with shebang
-      if (!scriptContent.startsWith("#!")) {
-        scriptContent = "#!/bin/bash\n" + scriptContent;
-      }
-
-      // Save script
-      fs.writeFileSync(runSh, scriptContent + "\n", { encoding: "utf8", mode: 0o755 });
-      
-      renderer.agentLog("infra", "create", `✓ run.sh created (${scriptContent.split("\n").length} lines)`);
-      this.memory.logAction("file", "create", "run.sh");
-      
-      // Show first few lines
-      const preview = scriptContent.split("\n").slice(0, 3).join("\n");
-      console.log(`\n  ${C.bgreen}run.sh${C.reset}\n  ${C.grey}${preview}...\n`);
-      
-    } catch (err) {
-      renderer.agentLog("infra", "warn", `Could not generate run.sh: ${err.message}`);
-      
-      // Fallback: create basic script
-      const fallback = [
-        "#!/bin/bash",
-        'cd "$(dirname "$0")"',
-        "echo '🚀 Starting ZerathCode project...'",
-        this._phases.backend.length > 0 ? "npm start 2>&1 | tee project.log &" : "npm run dev 2>&1 | tee project.log",
-        "echo '✓ Project started'",
-      ].join("\n") + "\n";
-      
-      fs.writeFileSync(runSh, fallback, { encoding: "utf8", mode: 0o755 });
-      renderer.agentLog("infra", "ok", `✓ Fallback run.sh created`);
+    if (!hasPackageJson && !backendEntry && !hasFrontend) {
+      renderer.agentLog("infra", "warn", "No project files found yet — run.sh skipped");
+      return;
     }
+
+    const lines = ["#!/bin/bash", 'cd "$(dirname "$0")"', ""];
+
+    if (hasPackageJson) {
+      lines.push("# Install dependencies if needed");
+      lines.push('[ ! -d node_modules ] && npm install');
+      lines.push("");
+    }
+
+    if (hasFrontend && backendEntry) {
+      lines.push(`# Start backend on port ${this._backendPort}`);
+      lines.push(`PORT=${this._backendPort} node ${backendEntry} &`);
+      lines.push("BACKEND_PID=$!");
+      lines.push("");
+      lines.push(`# Start frontend dev server on port ${this._frontendPort}`);
+      lines.push("npm run dev &");
+      lines.push("FRONTEND_PID=$!");
+      lines.push("");
+      lines.push(`echo "✔ Backend  → http://localhost:${this._backendPort}"`);
+      lines.push(`echo "✔ Frontend → http://localhost:${this._frontendPort}"`);
+      lines.push('echo "Press Ctrl+C to stop both"');
+      lines.push("wait");
+    } else if (hasFrontend) {
+      lines.push(`echo "✔ Starting frontend on port ${this._frontendPort}"`);
+      lines.push("npm run dev");
+    } else if (backendEntry) {
+      lines.push(`echo "✔ Starting server on port ${this._backendPort}"`);
+      lines.push(`PORT=${this._backendPort} node ${backendEntry}`);
+    }
+
+    const script = lines.join("\n") + "\n";
+    fs.writeFileSync(runSh, script, { encoding: "utf8", mode: 0o755 });
+    renderer.agentLog("infra", "create", `✓ run.sh generated (${lines.length} lines)`);
+
+    console.log(`\n  ${C.bgreen}run.sh${C.reset}\n  ${C.grey}${lines.slice(0, 4).join("\n  ")}...\n`);
   }
 
   // ── Main process turn ──────────────────────────────────────────────────────
@@ -372,13 +321,12 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
         return;
       }
 
-      // Parse and validate AI response
       const parseResult = this._parseSteps(raw);
       const steps = parseResult.steps;
-      
+
       if (!steps?.length) {
         if (parseResult.error) {
-          renderer.errorBox(`JSON PARSE ERROR`, 
+          renderer.errorBox(`JSON PARSE ERROR`,
             `Failed to parse AI response: ${parseResult.error}\n\nAI Response (first 500 chars):\n${raw.slice(0, 500)}`);
           renderer.agentLog("ai", "error", `Invalid JSON: ${parseResult.error}`);
         } else {
@@ -387,7 +335,7 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
         this.memory.addAssistantMessage(raw.slice(0, 500));
         return;
       }
-      
+
       if (parseResult.warnings?.length) {
         for (const warn of parseResult.warnings) {
           renderer.agentLog("ai", "warn", warn);
@@ -406,7 +354,6 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
         }
       }
 
-      // Execute plan with phase awareness
       const batches          = this._buildPlan(steps);
       const loopHasWebFetch  = steps.some(s => s.action === "web_fetch");
       const suppressMessages = isChatMode && loopHasWebFetch;
@@ -434,7 +381,6 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
           if (step.action === "message" && silent) suppressedText += (result || "") + "\n";
         }
 
-        // After each batch, check if a phase just completed
         await this._checkPhaseTransitions();
       }
 
@@ -446,11 +392,9 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
       if (!hasToolCall && !gotAnswer) break;
     }
 
-    // Phase transitions after files created (fullstack mode)
     if (this.mode === "fullstack" && this._filesCreated > 0) {
       renderer.agentLog("infra", "info", "Phase transition: Finalizing frontend and backend setup…");
-      
-      // Try to install dependencies and start frontend
+
       const hasPkg = fs.existsSync(path.join(this.workDir, "package.json"));
       if (hasPkg && !this._frontendDone) {
         renderer.agentLog("infra", "run", "🔧 Installing dependencies…");
@@ -460,14 +404,12 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
         } else {
           renderer.agentLog("infra", "warn", "npm install had issues but continuing…");
         }
-        
-        // Start frontend after deps installed
         await this._startFrontend();
       }
-      
-      // Then start backend if frontend completed
+
       if (this._frontendDone && !this._backendDone &&
-          fs.existsSync(path.join(this.workDir, "server.js"))) {
+          ["server.js","index.js","app.js"].some(f =>
+            fs.existsSync(path.join(this.workDir, f)))) {
         await this._startBackend();
       }
     }
@@ -486,26 +428,20 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
 
     const hasNpmModules = fs.existsSync(path.join(this.workDir, "node_modules"));
 
-    // Try to start frontend
     if (!this._frontendDone && hasNpmModules) {
       const frontendReady = this._frontendEntry ||
         ["src/App.jsx","src/main.jsx","index.html"].some(f =>
           fs.existsSync(path.join(this.workDir, f)));
 
-      if (frontendReady || force) {
-        await this._startFrontend();
-      }
+      if (frontendReady || force) await this._startFrontend();
     }
 
-    // Try to start backend (only after frontend)
     if (this._frontendDone && !this._backendDone && hasNpmModules) {
       const backendReady = this._backendEntry ||
         ["server.js","index.js","app.js"].some(f =>
           fs.existsSync(path.join(this.workDir, f)));
 
-      if (backendReady || force) {
-        await this._startBackend();
-      }
+      if (backendReady || force) await this._startBackend();
     }
   }
 
@@ -515,7 +451,6 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
 
     this.procMgr.frontend.port = this._frontendPort;
 
-    // Detect start command
     let cmd = "npx", args = ["vite", "--port", String(this._frontendPort)];
     const pkg = this._readPkg();
     if (pkg?.scripts?.dev?.includes("vite")) { cmd = "npm"; args = ["run", "dev"]; }
@@ -528,8 +463,6 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
     });
 
     this.logAgent.attachFrontend(this.procMgr.frontend);
-
-    // AI status report
     await this._statusReport("frontend", this._frontendPort);
   }
 
@@ -549,47 +482,14 @@ DO NOT include any markdown, backticks, or explanation. Just the raw bash script
     });
 
     this.logAgent.attachBackend(this.procMgr.backend);
-
-    // AI status report
     await this._statusReport("backend", this._backendPort);
   }
 
-  // ── AI confirmation after each phase ───────────────────────────────────────
-  async _confirmPhaseCompletion(phase, action) {
-    renderer.agentLog("ai", "info", `Confirming ${phase} completion…`);
-    
-    try {
-      const prompt = `You are the ZerathCode confirmation agent.
-
-The developer has just ${action}.
-
-Respond with ONLY this exact JSON array format:
-[
-  { "action": "message", "params": { "text": "✅ ${phase.toUpperCase()} SETUP COMPLETE\\n\\nWhat was changed:\\n- [list the files and changes made]\\n\\nFiles created: [list file names]\\n\\nNext: [what happens next]" } }
-]`;
-
-      const raw = await this.ai.ask(this.provider, prompt, { maxTokens: 300 });
-      const parseResult = this._parseSteps(raw);
-      
-      if (parseResult.steps?.length) {
-        for (const s of parseResult.steps) {
-          if (s.action === "message") {
-            renderer.aiMessage(s.params?.text || "", this.provider);
-          }
-        }
-      }
-    } catch (err) {
-      renderer.agentLog("system", "warn", `Phase confirmation skipped: ${err.message}`);
-    }
-  }
-
-  // ── AI status report after phase start ────────────────────────────────────
   async _statusReport(phase, port) {
     const logLines = this.procMgr.readLog(phase, 20);
     const projName = this.memory?.getProject?.()?.name || "project";
 
-    renderer.agentLog("ai", "info",
-      `Generating ${phase} status report…`);
+    renderer.agentLog("ai", "info", `Generating ${phase} status report…`);
 
     try {
       const raw = await this.ai.ask(
@@ -599,22 +499,13 @@ Respond with ONLY this exact JSON array format:
       );
 
       const parseResult = this._parseSteps(raw);
-      
-      if (parseResult.error) {
-        renderer.agentLog("ai", "warn", `Status report JSON error: ${parseResult.error}`);
-        // Still print basic info
-        console.log(
-          `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
-          `${C.bcyan}  ║  ${C.white}PHASE STATUS: ${phase.toUpperCase().padEnd(39)}${C.bcyan}║${C.reset}\n` +
-          `${C.bcyan}  ╠${"═".repeat(54)}╣${C.reset}\n` +
-          `${C.bcyan}  ║  ✔ ${phase.toUpperCase()} RUNNING at http://localhost:${port}${C.reset}\n` +
-          `${C.bcyan}  ║  Logs: ${path.basename(phase)}.log${C.reset}\n` +
-          `${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`
-        );
-      } else if (parseResult.steps?.length) {
+
+      if (parseResult.error || !parseResult.steps?.length) {
+        // Fallback status block
+        this._printStatusBlock(phase, port);
+      } else {
         for (const s of parseResult.steps) {
           if (s.action === "message") {
-            // Print as a distinct status block
             const text = s.params?.text || "";
             console.log(
               `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
@@ -630,18 +521,19 @@ Respond with ONLY this exact JSON array format:
         }
       }
     } catch (err) {
-      renderer.agentLog("system", "warn",
-        `Status report skipped: ${err.message}`);
-      // Still print basic info
-      console.log(
-        `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
-        `${C.bcyan}  ║  ${C.white}PHASE STATUS: ${phase.toUpperCase().padEnd(39)}${C.bcyan}║${C.reset}\n` +
-        `${C.bcyan}  ╠${"═".repeat(54)}╣${C.reset}\n` +
-        `${C.bcyan}  ║  ✔ ${phase.toUpperCase()} RUNNING at http://localhost:${port}${C.reset}\n` +
-        `${C.bcyan}  ║  Check logs: ${phase}.log${C.reset}\n` +
-        `${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`
-      );
+      renderer.agentLog("system", "warn", `Status report skipped: ${err.message}`);
+      this._printStatusBlock(phase, port);
     }
+  }
+
+  _printStatusBlock(phase, port) {
+    console.log(
+      `\n${C.bcyan}  ╔${"═".repeat(54)}╗${C.reset}\n` +
+      `${C.bcyan}  ║  ${C.white}PHASE STATUS: ${phase.toUpperCase().padEnd(39)}${C.bcyan}║${C.reset}\n` +
+      `${C.bcyan}  ╠${"═".repeat(54)}╣${C.reset}\n` +
+      `${C.bcyan}  ║  ✔ ${phase.toUpperCase()} RUNNING at http://localhost:${port}${" ".repeat(Math.max(0, 30 - String(port).length))}${C.bcyan}║${C.reset}\n` +
+      `${C.bcyan}  ╚${"═".repeat(54)}╝${C.reset}\n`
+    );
   }
 
   // ── Execution plan: parallel file batches ─────────────────────────────────
@@ -671,42 +563,51 @@ Respond with ONLY this exact JSON array format:
   }
 
   // ── Single step ────────────────────────────────────────────────────────────
+  // NOTE: Gemini often returns flat structures like { action, path, content }
+  // instead of { action, params: { path, content } }.
+  // All file operations support both via _pickParam() helper.
   async _executeStep(step, opts = {}) {
     const { action, params = {} } = step;
 
+    // ── Helper: read a field from params first, then from step directly ──────
+    const pick = (key, ...aliases) => {
+      for (const k of [key, ...aliases]) {
+        if (params[k] !== undefined) return params[k];
+      }
+      for (const k of [key, ...aliases]) {
+        if (step[k] !== undefined) return step[k];
+      }
+      return undefined;
+    };
+
     switch (action) {
 
+      // ── message ─────────────────────────────────────────────────────────────
       case "message": {
-        if (!opts.silent) renderer.aiMessage(params.text || "", this.provider);
-        return params.text;
+        const text = pick("text") || "";
+        if (!opts.silent) renderer.aiMessage(text, this.provider);
+        return text;
       }
 
+      // ── plan ─────────────────────────────────────────────────────────────────
       case "plan": {
         if (Array.isArray(params.steps)) renderer.planBlock(params.steps);
 
-        // Extract phase metadata from plan
         if (params.frontend_port) this._frontendPort = parseInt(params.frontend_port) || 5173;
         if (params.backend_port)  this._backendPort  = parseInt(params.backend_port)  || 3001;
         if (params.frontend_entry) this._frontendEntry = params.frontend_entry;
         if (params.backend_entry)  this._backendEntry  = params.backend_entry;
 
-        // Update process manager ports
         this.procMgr.frontend.port = this._frontendPort;
         this.procMgr.backend.port  = this._backendPort;
 
-        // Register which files belong to which phase
         if (Array.isArray(params.phases)) {
           for (const ph of params.phases) {
-            if (ph.name === "frontend" && Array.isArray(ph.files)) {
-              this._phases.frontend = ph.files;
-            }
-            if (ph.name === "backend" && Array.isArray(ph.files)) {
-              this._phases.backend = ph.files;
-            }
+            if (ph.name === "frontend" && Array.isArray(ph.files)) this._phases.frontend = ph.files;
+            if (ph.name === "backend"  && Array.isArray(ph.files)) this._phases.backend  = ph.files;
           }
         }
 
-        // Print phase summary
         if (this._phases.frontend.length || this._phases.backend.length) {
           console.log(
             `\n  ${C.byellow}FRONTEND${C.reset} (port ${this._frontendPort}): ` +
@@ -718,9 +619,10 @@ Respond with ONLY this exact JSON array format:
         return null;
       }
 
+      // ── search_files ─────────────────────────────────────────────────────────
       case "search_files": {
-        const op = params.op || "find";
-        const pattern = params.pattern || params.query || params.path || "";
+        const op      = pick("op") || "find";
+        const pattern = pick("pattern", "query", "path") || "";
         let result = "";
         if (op === "grep") {
           const hits = this.fileCtx.grep(pattern);
@@ -728,8 +630,8 @@ Respond with ONLY this exact JSON array format:
             ? `No matches: ${pattern}`
             : hits.slice(0,20).map(h => `${h.rel}:${h.lineNo}  ${h.content}`).join("\n");
         } else if (op === "read") {
-          const content = this.fileCtx.readFile(params.path || pattern);
-          result = content ? `--- ${params.path || pattern} ---\n${content}` : `Not found: ${params.path || pattern}`;
+          const content = this.fileCtx.readFile(pick("path") || pattern);
+          result = content ? `--- ${pick("path") || pattern} ---\n${content}` : `Not found: ${pick("path") || pattern}`;
         } else {
           const files = this.fileCtx.find(pattern);
           result = files.length === 0
@@ -741,10 +643,15 @@ Respond with ONLY this exact JSON array format:
         return result;
       }
 
+      // ── create_file ───────────────────────────────────────────────────────────
       case "create_file": {
-        const fp = this._resolvePath(params.path);
+        // Support both nested params and flat step structure from Gemini
+        const pathValue    = pick("path", "file", "filename", "filePath");
+        const contentValue = pick("content") ?? "";
+
+        const fp = this._resolvePath(pathValue);
         if (!fp) {
-          renderer.agentLog("file", "error", `Invalid path: ${params.path}`);
+          renderer.agentLog("file", "error", `Invalid path: ${pathValue}`);
           return null;
         }
         const rel = path.relative(this.workDir, fp);
@@ -758,14 +665,11 @@ Respond with ONLY this exact JSON array format:
         try {
           const dir = path.dirname(fp);
           if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-          const content = params.content || "";
-          
-          // Write file and verify
-          fs.writeFileSync(fp, content, { encoding: "utf8", mode: 0o644 });
-          
-          // Verify file was actually written
+
+          fs.writeFileSync(fp, contentValue, { encoding: "utf8", mode: 0o644 });
+
           if (!fs.existsSync(fp)) {
-            renderer.agentLog("file", "error", `${rel}  ${C.grey}FILE WRITE FAILED (not found on disk)${C.reset}`);
+            renderer.agentLog("file", "error", `${rel}  ${C.grey}FILE WRITE FAILED${C.reset}`);
             return null;
           }
 
@@ -775,60 +679,63 @@ Respond with ONLY this exact JSON array format:
             sh:"Shell",md:"MD" }[ext] || ext.toUpperCase();
 
           renderer.agentLog("file", "create",
-            `${rel}  ${C.grey}(${lang}, ${content.split("\n").length}L)${C.reset}`);
+            `${rel}  ${C.grey}(${lang}, ${contentValue.split("\n").length}L)${C.reset}`);
           this.memory.logAction("file", "create", rel);
-          
-          // Register file with detailed error handling
-          if (!this.memory.projectDir) {
-            renderer.agentLog("file", "error", `${rel}  ${C.grey}TRACKING FAILED (memory.projectDir not set)${C.reset}`);
-          } else {
+
+          if (this.memory.projectDir) {
             this.memory.registerFile(fp, `${lang} — ${path.basename(fp)}`, lang);
-            renderer.agentLog("memory", "ok", `${rel}  registered in memory`);
           }
-          
+
           this.memory.markFileComplete(fp);
           this._filesCreated++;
           this.fileCtx.invalidate();
 
           const showExts = new Set(["js","jsx","ts","tsx","html","css","json","sh","md"]);
-          if (showExts.has(ext) && content.length > 0) {
-            renderer.filePreview(rel, content, PREVIEW_LINES);
+          if (showExts.has(ext) && contentValue.length > 0) {
+            renderer.filePreview(rel, contentValue, PREVIEW_LINES);
           }
         } finally { release(); }
         return null;
       }
 
+      // ── edit_file ─────────────────────────────────────────────────────────────
       case "edit_file": {
-        const fp = this._resolvePath(params.path);
+        const pathValue = pick("path", "file", "filename");
+        const fp = this._resolvePath(pathValue);
         if (!fp) return null;
 
         if (!fs.existsSync(fp)) {
-          return this._executeStep({ action:"create_file", params: { path: params.path, content: params.content || "" } });
+          return this._executeStep({
+            action: "create_file",
+            params: { path: pathValue, content: pick("content") || "" }
+          });
         }
 
         const release = await this.mutex.acquire(fp);
         try {
           let content = fs.readFileSync(fp, "utf8");
           const rel   = path.relative(this.workDir, fp);
+          const findV = pick("find");
+          const replV = pick("replace");
 
-          if (params.find !== undefined && params.replace !== undefined) {
-            if (content.includes(params.find)) {
-              content = content.replace(params.find, params.replace);
+          if (findV !== undefined && replV !== undefined) {
+            if (content.includes(findV)) {
+              content = content.replace(findV, replV);
               fs.writeFileSync(fp, content, "utf8");
               renderer.agentLog("file", "edit", `${rel}  ${C.grey}(find-replace)${C.reset}`);
             } else {
               renderer.agentLog("file", "warn", `edit_file: text not found in ${rel}`);
             }
-          } else if (params.line) {
+          } else if (pick("line") !== undefined) {
             const lines = content.split(/\r?\n/);
-            const ln    = parseInt(params.line);
+            const ln    = parseInt(pick("line"));
             if (ln >= 1 && ln <= lines.length) {
-              lines[ln - 1] = params.content || "";
+              lines[ln - 1] = pick("content") || "";
               fs.writeFileSync(fp, lines.join("\n"), "utf8");
               renderer.agentLog("file", "edit", `${rel}  ${C.grey}line ${ln}${C.reset}`);
             }
-          } else if (params.content !== undefined) {
-            fs.writeFileSync(fp, params.content, "utf8");
+          } else if (pick("content") !== undefined) {
+            fs.writeFileSync(fp, pick("content"), "utf8");
             renderer.agentLog("file", "edit", `${rel}  ${C.grey}(full rewrite)${C.reset}`);
           }
 
@@ -836,7 +743,6 @@ Respond with ONLY this exact JSON array format:
           this.fileCtx.invalidate();
         } finally { release(); }
 
-        // Restart the appropriate subprocess
         const rel = path.relative(this.workDir, fp);
         const isFrontend = this._isFrontendFile(rel);
         if (isFrontend && this._frontendDone && this.procMgr.frontend.isRunning()) {
@@ -849,15 +755,17 @@ Respond with ONLY this exact JSON array format:
         return null;
       }
 
+      // ── append_file ───────────────────────────────────────────────────────────
       case "append_file": {
-        const fp = this._resolvePath(params.path);
+        const pathValue = pick("path", "file", "filename");
+        const fp = this._resolvePath(pathValue);
         if (!fp) return null;
         if (!fs.existsSync(fp)) fs.writeFileSync(fp, "", "utf8");
         const release = await this.mutex.acquire(fp);
         try {
           const cur = fs.readFileSync(fp, "utf8");
           const sep = cur && !cur.endsWith("\n") ? "\n" : "";
-          fs.appendFileSync(fp, sep + (params.content || "") + "\n", "utf8");
+          fs.appendFileSync(fp, sep + (pick("content") || "") + "\n", "utf8");
           renderer.agentLog("file", "edit",
             `${path.relative(this.workDir, fp)}  ${C.grey}(appended)${C.reset}`);
           this.fileCtx.invalidate();
@@ -865,8 +773,10 @@ Respond with ONLY this exact JSON array format:
         return null;
       }
 
+      // ── delete_file ───────────────────────────────────────────────────────────
       case "delete_file": {
-        const fp = this._resolvePath(params.path);
+        const pathValue = pick("path", "file", "filename");
+        const fp = this._resolvePath(pathValue);
         if (!fp || !fs.existsSync(fp)) return null;
         const release = await this.mutex.acquire(fp);
         try {
@@ -880,14 +790,16 @@ Respond with ONLY this exact JSON array format:
         return null;
       }
 
+      // ── read_file ─────────────────────────────────────────────────────────────
       case "read_file": {
-        const fp = this._resolvePath(params.path);
+        const pathValue = pick("path", "file", "filename");
+        const fp = this._resolvePath(pathValue);
         if (!fp || !fs.existsSync(fp)) {
-          renderer.agentLog("file", "warn", `read_file: ${params.path} not found`);
+          renderer.agentLog("file", "warn", `read_file: ${pathValue} not found`);
           return null;
         }
-        const from = params.from_line ? parseInt(params.from_line) : null;
-        const to   = params.to_line   ? parseInt(params.to_line)   : null;
+        const from = pick("from_line") ? parseInt(pick("from_line")) : null;
+        const to   = pick("to_line")   ? parseInt(pick("to_line"))   : null;
         let content;
         try {
           const lines = fs.readFileSync(fp, "utf8").split(/\r?\n/);
@@ -901,87 +813,98 @@ Respond with ONLY this exact JSON array format:
         return content;
       }
 
+      // ── run_command ───────────────────────────────────────────────────────────
       case "run_command": {
-        if (!params.cmd) return null;
-        if (params.background) { renderer.agentLog("infra","info","Server start queued"); return null; }
+        const cmd  = pick("cmd", "command");
+        const args = pick("args") || [];
+        if (!cmd) return null;
+        if (pick("background")) { renderer.agentLog("infra","info","Server start queued"); return null; }
 
-        const cwd  = params.cwd ? path.resolve(this.workDir, params.cwd) : this.workDir;
-        const args = Array.isArray(params.args) ? params.args : [];
-
-        renderer.agentLog("system", "run", `${params.cmd} ${args.join(" ")}`);
+        const cwd = pick("cwd") ? path.resolve(this.workDir, pick("cwd")) : this.workDir;
+        renderer.agentLog("system", "run", `${cmd} ${args.join(" ")}`);
 
         const result = await this.healer.run(
-          params.cmd, args, cwd, params.timeout_ms || 300000);
+          cmd, Array.isArray(args) ? args : [args], cwd, pick("timeout_ms") || 300000);
 
         if (!result.success) {
-          this.memory.logError(`${params.cmd} ${args.join(" ")}`,
+          this.memory.logError(`${cmd} ${args.join(" ")}`,
             result.output?.slice(0,400) || "error");
         }
 
-        // After npm install: attempt phase transitions
-        if (params.cmd === "npm" && args[0] === "install" && this.mode === "fullstack") {
+        if (cmd === "npm" && args[0] === "install" && this.mode === "fullstack") {
           await this._checkPhaseTransitions();
         }
         return null;
       }
 
+      // ── web_fetch ─────────────────────────────────────────────────────────────
       case "web_fetch": {
-        const q = params.query || opts.query || "";
-        if (!params.url && !q) return null;
+        const q   = pick("query") || opts.query || "";
+        const url = pick("url");
+        if (!url && !q) return null;
         renderer.agentLog("web", "info",
-          params.url ? `Fetch ${params.url}` : `Search: ${String(q).slice(0,80)}`);
+          url ? `Fetch ${url}` : `Search: ${String(q).slice(0,80)}`);
         try {
-          const out = params.url
-            ? await WebAgent.fetchRelevant(params.url, q, { timeoutMs:15000, maxChars:8000 })
+          const out = url
+            ? await WebAgent.fetchRelevant(url, q, { timeoutMs:15000, maxChars:8000 })
             : await WebAgent.searchAndRag(q, { timeoutMs:15000, maxChars:8000, maxSites:12 });
           renderer.agentLog("web", "ok", `${out.status} — ${out.text.length} chars`);
           return out.text;
         } catch (err) { renderer.agentLog("web", "error", err.message); return null; }
       }
 
+      // ── memory_note ───────────────────────────────────────────────────────────
       case "memory_note": {
-        this.memory.addNote(params.note || "");
-        renderer.agentLog("memory", "memory", (params.note || "").slice(0,80));
+        this.memory.addNote(pick("note") || "");
+        renderer.agentLog("memory", "memory", (pick("note") || "").slice(0,80));
         return null;
       }
 
+      // ── ask_user ──────────────────────────────────────────────────────────────
       case "ask_user": {
-        renderer.aiMessage(params.question || "Please clarify:", this.provider);
-        return params.question;
+        const question = pick("question") || "Please clarify:";
+        renderer.aiMessage(question, this.provider);
+        return question;
       }
 
+      // ── deploy_app ────────────────────────────────────────────────────────────
       case "deploy_app": {
         await new InfrastructureAgent().run([
-          "deploy", "--port", String(params.port || 3001),
-          "--name", params.appName || "zerathapp", "--dir", params.dir || this.workDir,
+          "deploy", "--port", String(pick("port") || 3001),
+          "--name", pick("appName") || "zerathapp", "--dir", pick("dir") || this.workDir,
         ]);
         return null;
       }
 
+      // ── start_tunnel ──────────────────────────────────────────────────────────
       case "start_tunnel": {
-        await new InfrastructureAgent().run(["tunnel", "--port", String(params.port || 3001)]);
+        await new InfrastructureAgent().run(["tunnel", "--port", String(pick("port") || 3001)]);
         return null;
       }
 
+      // ── security_scan ─────────────────────────────────────────────────────────
       case "security_scan": {
-        await new SecurityAgent().run(["scan", params.dir || this.workDir]);
+        await new SecurityAgent().run(["scan", pick("dir") || this.workDir]);
         return null;
       }
 
+      // ── run_tests ─────────────────────────────────────────────────────────────
       case "run_tests": {
         await new QAAgent().run(["test", this.workDir]);
         return null;
       }
 
+      // ── notify ────────────────────────────────────────────────────────────────
       case "notify": {
-        await new AssistantAgent().run(["notify", params.title || "ZerathCode", params.content || ""]);
+        await new AssistantAgent().run(["notify", pick("title") || "ZerathCode", pick("content") || ""]);
         return null;
       }
 
+      // ── set_run_commands ──────────────────────────────────────────────────────
       case "set_run_commands": {
-        if (params.commands) {
-          this.memory.setRunCommands(
-            Array.isArray(params.commands) ? params.commands : [params.commands]);
+        const cmds = pick("commands");
+        if (cmds) {
+          this.memory.setRunCommands(Array.isArray(cmds) ? cmds : [cmds]);
         }
         return null;
       }
@@ -994,7 +917,6 @@ Respond with ONLY this exact JSON array format:
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  /** Detect if a relative file path belongs to the frontend phase */
   _isFrontendFile(rel) {
     const FRONTEND_PATTERNS = [
       /^src\//i, /^public\//i, /^index\.html$/, /^vite\.config\./,
@@ -1012,15 +934,18 @@ Respond with ONLY this exact JSON array format:
   _buildSystemPrompt(userQuery = "") {
     const base     = SYSTEM_PROMPTS[this.mode] || SYSTEM_PROMPTS.chat;
     const memCtx   = this.memory.buildContextBlock();
+    // Fix: use maxBytes (valid option) instead of tokenBudget/topK which don't exist
     const ragCtx   = (this.mode === "fullstack" || this.mode === "mobiledev")
-      ? this.fileCtx.build(userQuery, { tokenBudget: 1500, topK: 6 })
+      ? this.fileCtx.build(userQuery, { maxBytes: 4000 })
       : "";
     const completed = this.memory.getCompletedFiles();
     const completedNote = completed.length
       ? `\n\nCOMPLETED FILES (edit_file only):\n${completed.map(f => `  ✓ ${f}`).join("\n")}`
       : "";
     return [base, "\n\n" + memCtx, ragCtx ? "\n\n" + ragCtx : "", completedNote,
-      "\n\nFINAL REMINDER: Respond with a valid JSON array only. [ ... ]"].join("");
+      "\n\nFINAL REMINDER: Respond with a valid JSON array only. [ ... ]",
+      "\nAlways use { \"action\": \"create_file\", \"params\": { \"path\": \"...\", \"content\": \"...\" } }",
+    ].join("");
   }
 
   _buildPrompt(userInput) {
@@ -1043,110 +968,80 @@ Respond with ONLY this exact JSON array format:
     if (!raw || typeof raw !== "string") {
       return { steps: null, error: "AI response was empty or not a string", warnings: [] };
     }
-    
+
     let str = raw.trim();
-    
-    // Try to extract JSON from markdown code fence
+
+    // Strip markdown fences
     const fence = str.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence) {
-      str = fence[1].trim();
-    }
-    
-    // Find JSON array boundaries
+    if (fence) str = fence[1].trim();
+
+    // Find JSON array
     const s = str.indexOf("["), e = str.lastIndexOf("]");
     if (s === -1 || e === -1 || e <= s) {
-      return { 
-        steps: null, 
-        error: "No JSON array found in response", 
+      return {
+        steps: null,
+        error: "No JSON array found in response",
         warnings: [`Raw response start: "${raw.slice(0, 100)}..."`]
       };
     }
-    
+
     let jsonStr = str.slice(s, e + 1);
-    
+
+    // Attempt 1: direct parse
     try {
-      // Try direct parse first
       const p = JSON.parse(jsonStr);
       return this._validateAndReturnSteps(p);
+    } catch (_) {}
+
+    // Attempt 2: escape literal newlines inside JSON strings
+    try {
+      const fixed = this._escapeNewlinesInJson(jsonStr);
+      const p = JSON.parse(fixed);
+      return this._validateAndReturnSteps(p);
+    } catch (_) {}
+
+    // Attempt 3: aggressive cleanup
+    try {
+      const fixed = this._aggressiveJsonCleanup(jsonStr);
+      const p = JSON.parse(fixed);
+      return this._validateAndReturnSteps(p);
     } catch (err) {
-      // If direct parse fails, try to fix common issues
-      renderer.agentLog("ai", "warn", `JSON parse attempt 1 failed, trying cleanup…`);
-      
-      try {
-        // Fix 1: Escape unescaped newlines in string values
-        jsonStr = this._escapeNewlinesInJson(jsonStr);
-        const p = JSON.parse(jsonStr);
-        return this._validateAndReturnSteps(p);
-      } catch (err2) {
-        renderer.agentLog("ai", "warn", `JSON parse attempt 2 failed, trying aggressive cleanup…`);
-        
-        try {
-          // Fix 2: More aggressive cleanup - remove trailing commas, fix quotes
-          jsonStr = this._aggressiveJsonCleanup(jsonStr);
-          const p = JSON.parse(jsonStr);
-          return this._validateAndReturnSteps(p);
-        } catch (err3) {
-          return {
-            steps: null,
-            error: `JSON parse failed: ${err.message}. Attempted 3 fixes, all failed.`,
-            warnings: [
-              `Position ${s}-${e}`,
-              `Original error: ${err.message}`,
-              `After newline escape: ${err2.message}`,
-              `After aggressive cleanup: ${err3.message}`
-            ]
-          };
-        }
-      }
+      return {
+        steps: null,
+        error: `JSON parse failed after 3 attempts: ${err.message}`,
+        warnings: []
+      };
     }
   }
 
   _validateAndReturnSteps(obj) {
     if (!Array.isArray(obj)) {
-      return {
-        steps: null,
-        error: `Expected JSON array, got ${typeof obj}`,
-        warnings: []
-      };
+      return { steps: null, error: `Expected JSON array, got ${typeof obj}`, warnings: [] };
     }
-    
     const validSteps = obj.filter(x => x && typeof x.action === "string");
     const invalidCount = obj.length - validSteps.length;
-    const warnings = invalidCount > 0 
-      ? [`Filtered ${invalidCount} invalid step(s) from response`]
+    const warnings = invalidCount > 0
+      ? [`Filtered ${invalidCount} invalid step(s)`]
       : [];
-    
     return { steps: validSteps, error: null, warnings };
   }
 
   _escapeNewlinesInJson(jsonStr) {
-    // Regex-based approach: find all strings in JSON and escape literal newlines within them
-    // Pattern matches: "...string content..." accounting for escaped quotes
-    return jsonStr.replace(/"(?:[^"\\]|\\.)*"/g, (match) => {
-      // For each matched string, replace literal newlines with escaped \n
-      return match
-        .replace(/\r\n/g, "\\n")    // Windows line endings first
-        .replace(/\r/g, "\\n")      // Mac line endings
-        .replace(/\n/g, "\\n");     // Unix line endings
-    });
+    // Match JSON strings and escape any literal newlines inside them
+    return jsonStr.replace(/"(?:[^"\\]|\\.)*"/g, match =>
+      match.replace(/\r\n/g, "\\n").replace(/\r/g, "\\n").replace(/\n/g, "\\n")
+    );
   }
 
   _aggressiveJsonCleanup(jsonStr) {
-    // Remove trailing commas before ] or }
-    let result = jsonStr
-      .replace(/,(\s*[}\]])/g, "$1")    // trailing commas
-      .replace(/([}\]])\s*,\s*([}\]])/g, "$1$2");  // commas between closing braces
-    
-    // Fix common quote issues: replace fancy quotes with straight quotes
-    result = result
-      .replace(/[""]/g, '"')  // curly quotes to straight
-      .replace(/['']/g, "'");  // fancy apostrophes to straight
-    
-    return result;
+    return jsonStr
+      .replace(/,(\s*[}\]])/g, "$1")
+      .replace(/[""]/g, '"')
+      .replace(/['']/g, "'");
   }
 
   _resolvePath(rawPath) {
-    if (!rawPath) return null;
+    if (!rawPath || typeof rawPath !== "string") return null;
     try {
       const abs = rawPath.startsWith("/") ? rawPath : path.resolve(this.workDir, rawPath);
       if (!abs.startsWith(this.workDir)) {
