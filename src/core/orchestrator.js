@@ -90,7 +90,16 @@ AVAILABLE ACTIONS: message, create_file, read_file, search_files, web_fetch`,
 
   fullstack: `You are ZerathCode Full Stack Agent — builds complete web apps on Termux/Android.
 
-OUTPUT: ONLY a valid JSON array. Nothing before or after [].
+⚠️  CRITICAL: OUTPUT ONLY A SINGLE VALID JSON ARRAY.
+- No text before [ or after ]
+- NO markdown code blocks (no triple backticks)
+- NO literal newlines inside JSON strings
+- Escape all newlines as \\n in string values
+- Use straight double quotes, not fancy quotes  
+- Every string property must use \\n for line breaks, never actual newlines
+
+JSON Rules - Valid: { "text": "Line 1\\nLine 2" }
+JSON Rules - Invalid: { "text": "Line 1 [newline] Line 2" }
 
 STACK RULES (Termux ARM64 — STRICT):
   Frontend : React + Vite OR vanilla HTML+CSS+JS. NEVER server-side rendered.
@@ -110,14 +119,14 @@ PHASE-SPLIT EXECUTION (REQUIRED):
 
 PLAN STEP FORMAT (required):
   { "action": "plan", "params": {
-      "steps": ["1. ...", "2. ..."],
-      "frontend_entry": "index.html or npm run dev",
+      "steps": ["1. Create package.json", "2. Create vite.config.js"],
+      "frontend_entry": "index.html",
       "backend_entry": "server.js",
       "frontend_port": 5173,
       "backend_port": 3001,
       "phases": [
         { "name": "frontend", "files": ["package.json","vite.config.js","index.html","src/App.jsx","src/main.jsx","src/App.css"] },
-        { "name": "backend",  "files": ["server.js","db.js"] }
+        { "name": "backend",  "files": ["server.js"] }
       ]
   }}
 
@@ -138,12 +147,24 @@ AVAILABLE ACTIONS: plan, message, create_file, edit_file, append_file,
   delete_file, read_file, search_files, run_command, web_fetch, memory_note,
   ask_user, deploy_app, start_tunnel, security_scan`,
 
-  mobiledev: `You are ZerathCode Mobile Dev Agent. Output ONLY valid JSON arrays.
+  mobiledev: `You are ZerathCode Mobile Dev Agent.
+
+⚠️  OUTPUT ONLY VALID JSON ARRAY. NO MARKDOWN, NO BACKTICKS. ⚠️️
+- Start with [ and end with ]
+- NO literal newlines in strings (use \\n instead)
+- NO fancy quotes (use only "straight quotes")
+
 Check [PROJECT FILES] first. Use search_files before editing.
 AVAILABLE ACTIONS: plan, message, create_file, edit_file, search_files, read_file,
   run_command, memory_note, ask_user, security_scan`,
 
-  infra: `You are ZerathCode Infrastructure Agent. Output ONLY valid JSON arrays.
+  infra: `You are ZerathCode Infrastructure Agent.
+
+⚠️  OUTPUT ONLY VALID JSON ARRAY. NO MARKDOWN, NO BACKTICKS. ⚠️️
+- Start with [ and end with ]
+- NO literal newlines in strings (use \\n instead)
+- NO fancy quotes (use only "straight quotes")
+
 AVAILABLE ACTIONS: plan, message, create_file, run_command, deploy_app, start_tunnel, memory_note`,
 
   fullai: `[{ "action": "message", "params": { "text": "Full AI Mode ready." } }]`,
@@ -1022,32 +1043,129 @@ Respond with ONLY this exact JSON array format:
       };
     }
     
+    let jsonStr = str.slice(s, e + 1);
+    
     try {
-      const jsonStr = str.slice(s, e + 1);
+      // Try direct parse first
       const p = JSON.parse(jsonStr);
-      
-      if (!Array.isArray(p)) {
-        return {
-          steps: null,
-          error: `Expected JSON array, got ${typeof p}`,
-          warnings: []
-        };
-      }
-      
-      const validSteps = p.filter(x => x && typeof x.action === "string");
-      const invalidCount = p.length - validSteps.length;
-      const warnings = invalidCount > 0 
-        ? [`Filtered ${invalidCount} invalid step(s) from response`]
-        : [];
-      
-      return { steps: validSteps, error: null, warnings };
+      return this._validateAndReturnSteps(p);
     } catch (err) {
+      // If direct parse fails, try to fix common issues
+      renderer.agentLog("ai", "warn", `JSON parse attempt 1 failed, trying cleanup…`);
+      
+      try {
+        // Fix 1: Escape unescaped newlines in string values
+        jsonStr = this._escapeNewlinesInJson(jsonStr);
+        const p = JSON.parse(jsonStr);
+        return this._validateAndReturnSteps(p);
+      } catch (err2) {
+        renderer.agentLog("ai", "warn", `JSON parse attempt 2 failed, trying aggressive cleanup…`);
+        
+        try {
+          // Fix 2: More aggressive cleanup - remove trailing commas, fix quotes
+          jsonStr = this._aggressiveJsonCleanup(jsonStr);
+          const p = JSON.parse(jsonStr);
+          return this._validateAndReturnSteps(p);
+        } catch (err3) {
+          return {
+            steps: null,
+            error: `JSON parse failed: ${err.message}. Attempted 3 fixes, all failed.`,
+            warnings: [
+              `Position ${s}-${e}`,
+              `Original error: ${err.message}`,
+              `After newline escape: ${err2.message}`,
+              `After aggressive cleanup: ${err3.message}`
+            ]
+          };
+        }
+      }
+    }
+  }
+
+  _validateAndReturnSteps(obj) {
+    if (!Array.isArray(obj)) {
       return {
         steps: null,
-        error: `JSON parse failed: ${err.message}`,
-        warnings: [`At position ${s}-${e}: "${str.slice(Math.max(0,s-20), Math.min(str.length, e+20))}..."`]
+        error: `Expected JSON array, got ${typeof obj}`,
+        warnings: []
       };
     }
+    
+    const validSteps = obj.filter(x => x && typeof x.action === "string");
+    const invalidCount = obj.length - validSteps.length;
+    const warnings = invalidCount > 0 
+      ? [`Filtered ${invalidCount} invalid step(s) from response`]
+      : [];
+    
+    return { steps: validSteps, error: null, warnings };
+  }
+
+  _escapeNewlinesInJson(jsonStr) {
+    // This is conservative: only escape newlines that appear inside quoted strings
+    // Split by quotes, escape newlines only in non-quoted sections
+    let result = "";
+    let inString = false;
+    let escape = false;
+    let i = 0;
+    
+    while (i < jsonStr.length) {
+      const char = jsonStr[i];
+      const nextChar = jsonStr[i + 1];
+      
+      // Handle escape sequences
+      if (escape) {
+        result += char;
+        escape = false;
+        i++;
+        continue;
+      }
+      
+      if (char === "\\") {
+        escape = true;
+        result += char;
+        i++;
+        continue;
+      }
+      
+      // Track if we're inside a string
+      if (char === '"') {
+        inString = !inString;
+        result += char;
+        i++;
+        continue;
+      }
+      
+      // If inside a string and we hit a literal newline, escape it
+      if (inString && (char === "\n" || char === "\r")) {
+        if (char === "\r" && nextChar === "\n") {
+          result += "\\n";
+          i += 2;
+        } else {
+          result += "\\n";
+          i++;
+        }
+        continue;
+      }
+      
+      result += char;
+      i++;
+    }
+    
+    return result;
+  }
+
+  _aggressiveJsonCleanup(jsonStr) {
+    // Remove trailing commas before ] or }
+    let result = jsonStr
+      .replace(/,(\s*[}\]])/g, "$1")    // trailing commas
+      .replace(/([}\]])\s*,\s*([}\]])/g, "$1$2");  // commas between closing braces
+    
+    // Fix common quote issues: replace fancy quotes with straight quotes
+    result = result
+      .replace(/[""]/g, '"')  // curly quotes to straight
+      .replace(/['']/g, "'");  // fancy apostrophes to straight
+    
+    return result;
   }
 
   _resolvePath(rawPath) {
