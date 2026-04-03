@@ -1101,57 +1101,15 @@ Respond with ONLY this exact JSON array format:
   }
 
   _escapeNewlinesInJson(jsonStr) {
-    // This is conservative: only escape newlines that appear inside quoted strings
-    // Split by quotes, escape newlines only in non-quoted sections
-    let result = "";
-    let inString = false;
-    let escape = false;
-    let i = 0;
-    
-    while (i < jsonStr.length) {
-      const char = jsonStr[i];
-      const nextChar = jsonStr[i + 1];
-      
-      // Handle escape sequences
-      if (escape) {
-        result += char;
-        escape = false;
-        i++;
-        continue;
-      }
-      
-      if (char === "\\") {
-        escape = true;
-        result += char;
-        i++;
-        continue;
-      }
-      
-      // Track if we're inside a string
-      if (char === '"') {
-        inString = !inString;
-        result += char;
-        i++;
-        continue;
-      }
-      
-      // If inside a string and we hit a literal newline, escape it
-      if (inString && (char === "\n" || char === "\r")) {
-        if (char === "\r" && nextChar === "\n") {
-          result += "\\n";
-          i += 2;
-        } else {
-          result += "\\n";
-          i++;
-        }
-        continue;
-      }
-      
-      result += char;
-      i++;
-    }
-    
-    return result;
+    // Regex-based approach: find all strings in JSON and escape literal newlines within them
+    // Pattern matches: "...string content..." accounting for escaped quotes
+    return jsonStr.replace(/"(?:[^"\\]|\\.)*"/g, (match) => {
+      // For each matched string, replace literal newlines with escaped \n
+      return match
+        .replace(/\r\n/g, "\\n")    // Windows line endings first
+        .replace(/\r/g, "\\n")      // Mac line endings
+        .replace(/\n/g, "\\n");     // Unix line endings
+    });
   }
 
   _aggressiveJsonCleanup(jsonStr) {
